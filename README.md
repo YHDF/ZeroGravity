@@ -48,6 +48,13 @@ sequenceDiagram
 ### 3. OpenWebUI Internal Interceptor
 * Filters out OpenWebUI's automatic background meta-prompts (tag generation, follow-up suggestions, chat titles) and answers them in `<1ms`, preventing background tasks from triggering generation or modifying workspace files.
 
+### 4. Polyglot Language & Framework Support
+ZeroGravity natively parses, validates, and routes multi-language projects:
+* **Java & Spring Boot**: Automatic package-to-path resolution (`package com.example.demo...` automatically maps to `src/main/java/com/example/demo/<Class>.java` and `src/test/java/...` for `@Test` classes), Maven `pom.xml`, Gradle `build.gradle`, Spring annotations preservation (`@RestController`, `@Service`, `@Entity`, etc.).
+* **TypeScript & JavaScript**: Full support for Node.js, Express, React, Next.js, and Vite projects (`package.json`, `tsconfig.json`, `*.ts`, `*.tsx`, `*.js`, `*.jsx`), ES modules, and Jest/Vitest runners.
+* **Configuration & Data Formats**: Native syntax validation for `application.yaml` (PyYAML), `package.json` (JSON parser), and `pom.xml` (XML ElementTree), passing data files directly without unwanted code wrappers.
+* **Python**: Full support for FastAPI, Flask, Django, Pytest, and CLI scripts with AST syntax validation.
+
 ---
 
 ## 📂 Audit Telemetry & History (`.gemini-history/`)

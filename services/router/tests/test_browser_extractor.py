@@ -11,6 +11,8 @@ from browser_extractor import (
     validate_file_path,
     validate_commands,
     extract_and_validate_code,
+    check_syntax_sanity,
+    resolve_java_path,
 )
 
 
@@ -164,7 +166,147 @@ pytest tests/test_api.py
         self.assertNotIn("Plaintext", res_d["files_to_write"][0]["content"])
         self.assertIn("pytest tests/test_api.py", res_d.get("commands_to_run", []))
 
+    def test_typescript_nodejs_extraction(self):
+        raw_ts = """
+File: package.json
+JSON
+{
+  "name": "zero-gravity-app",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "jest"
+  }
+}
+
+File: tsconfig.json
+JSON
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext"
+  }
+}
+
+File: src/index.ts
+TypeScript
+import express, { Request, Response } from 'express';
+
+const app = express();
+app.get('/health', (req: Request, res: Response) => {
+    res.json({ status: 'ok' });
+});
+
+export default app;
+
+Bash
+npm install
+npm test
+"""
+        res = extract_and_validate_code(raw_ts)
+        self.assertTrue(res.get("valid"))
+        self.assertEqual(len(res.get("files_to_write", [])), 3)
+        paths = [f["path"] for f in res["files_to_write"]]
+        self.assertEqual(paths, ["package.json", "tsconfig.json", "src/index.ts"])
+        self.assertIn("zero-gravity-app", res["files_to_write"][0]["content"])
+        self.assertIn("npm test", res.get("commands_to_run", []))
+
+    def test_java_spring_boot_extraction_and_package_mapping(self):
+        raw_java = """
+File: pom.xml
+XML
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example</groupId>
+    <artifactId>demo</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+</project>
+
+File: src/main/resources/application.yaml
+YAML
+server:
+  port: 8080
+spring:
+  application:
+    name: demo-service
+
+File: UserController.java
+Java
+package com.example.demo.controller;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class UserController {
+    @GetMapping("/users")
+    public String getUsers() {
+        return "all users";
+    }
+}
+
+File: UserControllerTest.java
+Java
+package com.example.demo.controller;
+
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+public class UserControllerTest {
+    @Test
+    void testSample() {
+        assertTrue(true);
+    }
+}
+
+Bash
+mvn clean test
+"""
+        res = extract_and_validate_code(raw_java)
+        self.assertTrue(res.get("valid"))
+        self.assertEqual(len(res.get("files_to_write", [])), 4)
+        paths = [f["path"] for f in res["files_to_write"]]
+        self.assertIn("pom.xml", paths)
+        self.assertIn("src/main/resources/application.yaml", paths)
+        self.assertIn("src/main/java/com/example/demo/controller/UserController.java", paths)
+        self.assertIn("src/test/java/com/example/demo/controller/UserControllerTest.java", paths)
+        self.assertIn("mvn clean test", res.get("commands_to_run", []))
+
+    def test_yaml_json_syntax_validation(self):
+        # Valid YAML
+        valid, msg = check_syntax_sanity("application.yaml", "server:\n  port: 8080\n")
+        self.assertTrue(valid)
+
+        # Invalid YAML
+        valid, msg = check_syntax_sanity("application.yaml", "server: [invalid yaml {")
+        self.assertFalse(valid)
+        self.assertIn("YAML SyntaxError", msg)
+
+        # Valid JSON
+        valid, msg = check_syntax_sanity("package.json", '{"name": "test"}')
+        self.assertTrue(valid)
+
+        # Invalid JSON
+        valid, msg = check_syntax_sanity("package.json", '{"name": "test",,}')
+        self.assertFalse(valid)
+        self.assertIn("JSON SyntaxError", msg)
+
+    def test_polyglot_command_safety(self):
+        safe_cmds = [
+            "npm install",
+            "npm run build",
+            "npm test",
+            "mvn clean install",
+            "./mvnw test",
+            "gradle test",
+            "./gradlew build",
+            "pytest tests/",
+            "python main.py",
+        ]
+        valid, msg = validate_commands(safe_cmds)
+        self.assertTrue(valid)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

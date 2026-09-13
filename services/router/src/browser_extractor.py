@@ -107,14 +107,55 @@ def validate_commands(commands: Optional[List[str]]) -> tuple[bool, str]:
 
 
 import ast
+import json
+import xml.etree.ElementTree as ET
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+
+def resolve_java_path(declared_path: str, content: str) -> str:
+    """
+    If a Java file path is not fully structured (e.g. 'UserController.java' or 'src/UserController.java'),
+    inspects 'package com.example.demo.controller;' and maps it to standard Maven convention:
+    'src/main/java/com/example/demo/controller/UserController.java' (or src/test/java/ for tests).
+    """
+    if not declared_path.endswith(".java"):
+        return declared_path
+
+    # If it's already a full maven/gradle path, keep it
+    if declared_path.startswith("src/main/java/") or declared_path.startswith("src/test/java/"):
+        return declared_path
+
+    pkg_match = re.search(r'^\s*package\s+([a-zA-Z0-9_.]+)\s*;', content, re.MULTILINE)
+    if not pkg_match:
+        return declared_path
+
+    pkg_parts = pkg_match.group(1).split(".")
+    pkg_dir = "/".join(pkg_parts)
+    filename = os.path.basename(declared_path)
+
+    # Check if it is a test class
+    is_test = (
+        "Test" in filename or
+        bool(re.search(r'@(?:Test|SpringBootTest)', content)) or
+        "tests/" in declared_path or
+        "test/" in declared_path
+    )
+    root_dir = "src/test/java" if is_test else "src/main/java"
+    return f"{root_dir}/{pkg_dir}/{filename}"
 
 
 def check_syntax_sanity(filepath: str, content: str) -> tuple[bool, str]:
-    """Validates basic syntax sanity for Python and JSON code blocks."""
+    """Validates syntax sanity for Python, JSON, YAML, XML (pom.xml), Java, and JS/TS."""
     if not content or not content.strip():
         return False, f"File '{filepath}' has empty content."
 
     ext = os.path.splitext(filepath)[1].lower()
+    basename = os.path.basename(filepath).lower()
+
     if ext == ".py":
         try:
             ast.parse(content, filename=filepath)
@@ -125,6 +166,21 @@ def check_syntax_sanity(filepath: str, content: str) -> tuple[bool, str]:
             json.loads(content)
         except Exception as je:
             return False, f"JSON SyntaxError in '{filepath}': {je}"
+    elif ext in [".yaml", ".yml"]:
+        if yaml:
+            try:
+                yaml.safe_load(content)
+            except Exception as ye:
+                return False, f"YAML SyntaxError in '{filepath}': {ye}"
+    elif ext == ".xml" or basename == "pom.xml":
+        try:
+            ET.fromstring(content)
+        except Exception as xe:
+            return False, f"XML SyntaxError in '{filepath}': {xe}"
+    elif ext in [".js", ".jsx", ".ts", ".tsx", ".java"]:
+        brace_count = content.count("{") - content.count("}")
+        if abs(brace_count) > 10:
+            return False, f"Syntax warning in '{filepath}': Unbalanced curly braces (diff={brace_count})."
 
     return True, "Syntax sanity check passed."
 
@@ -176,10 +232,13 @@ def clean_code_preamble(content: str) -> str:
         if not l:
             continue
         # Skip header metadata lines like [file-tag: ...] or bare language headers
-        if re.match(r'^(?:\[file-tag:|^python$|^javascript$|^bash$|^html$)', l, re.IGNORECASE):
+        if re.match(r'^(?:\[file-tag:|^python$|^javascript$|^typescript$|^java$|^bash$|^html$|^css$|^json$|^yaml$|^xml$)', l, re.IGNORECASE):
             continue
-        # Check if line looks like actual code or valid comment
-        if re.match(r'^(?:#|//|/\*|<!--|import\s+|from\s+|def\s+|class\s+|const\s+|let\s+|var\s+|function\s+|if\s+__name__|print\()', l):
+        # Check if line looks like actual code, markup, or valid comment
+        if re.match(
+            r'^(?:#|//|/\*|<!--|import\s+|from\s+|export\s+|package\s+|@\w+|def\s+|class\s+|public\s+|private\s+|protected\s+|const\s+|let\s+|var\s+|function\s+|type\s+|interface\s+|if\s+__name__|print\(|<[a-zA-Z0-9_\-]+|\{|\{|\[|[a-zA-Z0-9_\-]+:\s+)',
+            l
+        ):
             start_idx = idx
             found = True
             break
@@ -200,9 +259,12 @@ def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
         "python": ".py", "py": ".py",
         "javascript": ".js", "js": ".js",
         "typescript": ".ts", "ts": ".ts",
+        "jsx": ".jsx", "tsx": ".tsx",
+        "java": ".java",
         "html": ".html", "css": ".css",
         "json": ".json", "sh": ".sh", "bash": ".sh",
         "yaml": ".yaml", "yml": ".yml",
+        "xml": ".xml", "properties": ".properties", "gradle": ".gradle",
         "markdown": ".md", "md": ".md",
         "text": ".txt", "txt": ".txt",
         "sql": ".sql",
@@ -224,6 +286,11 @@ def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
         lines = content.splitlines()
         first_line = lines[0].strip() if lines else ""
 
+        # Clean content early to inspect class/package if needed
+        clean_content = clean_code_preamble(content)
+        if not clean_content:
+            continue
+
         # Determine filename
         filename = None
         # Check fence extra (e.g. ```python # main.py or ```python file:src/app.py or ../../etc/passwd)
@@ -231,7 +298,7 @@ def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
             m = re.search(r'(?:#|//|file:)?\s*([a-zA-Z0-9_\-./]+)', fence_extra, re.IGNORECASE)
             if m and m.group(1).strip():
                 candidate = m.group(1).strip()
-                if candidate not in ["python", "bash", "sh", "javascript", "js"]:
+                if candidate not in ["python", "bash", "sh", "javascript", "js", "typescript", "ts", "java"]:
                     filename = candidate
 
         if not filename:
@@ -242,21 +309,30 @@ def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
         if not filename:
             if default_ext == ".py":
                 filename = "main.py" if idx == 0 else f"module_{idx+1}.py"
+            elif default_ext in [".ts", ".tsx"]:
+                filename = "src/index.ts" if idx == 0 else f"src/module_{idx+1}.ts"
+            elif default_ext in [".js", ".jsx"]:
+                filename = "src/index.js" if idx == 0 else f"src/module_{idx+1}.js"
+            elif default_ext == ".java":
+                cm = re.search(r'public\s+(?:class|interface|record|enum)\s+([a-zA-Z0-9_]+)', clean_content)
+                if cm:
+                    filename = f"{cm.group(1)}.java"
+                else:
+                    filename = f"Class_{idx+1}.java"
+            elif default_ext in [".yaml", ".yml"]:
+                filename = "application.yaml" if any(k in text.lower() for k in ["spring", "server:"]) else "config.yaml"
+            elif default_ext == ".json":
+                filename = "package.json" if "dependencies" in clean_content else f"data_{idx+1}.json"
+            elif default_ext == ".xml":
+                filename = "pom.xml" if "modelVersion" in clean_content else f"config_{idx+1}.xml"
             elif default_ext == ".html":
                 filename = "index.html"
             elif default_ext == ".css":
                 filename = "styles.css"
-            elif default_ext == ".js":
-                filename = "index.js"
             elif default_ext == ".sh":
                 filename = "run.sh"
             else:
                 filename = f"file_{idx+1}{default_ext}"
-
-        # Clean content
-        clean_content = clean_code_preamble(content)
-        if not clean_content:
-            continue
 
         # Separate shell scripts / installation commands from regular files
         if filename.endswith(".sh") or lang in ["bash", "sh"] or any(cmd_kw in clean_content for cmd_kw in ["npm install", "pip install"]):
@@ -302,9 +378,9 @@ def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
 
                 # Remove leading language name line if present (e.g. "Plaintext\n", "Python\n")
                 known_langs = {
-                    "python", "py", "javascript", "js", "typescript", "ts",
-                    "html", "css", "json", "bash", "sh", "shell", "sql",
-                    "plaintext", "text", "yaml", "yml", "markdown", "md"
+                    "python", "py", "javascript", "js", "typescript", "ts", "jsx", "tsx",
+                    "java", "html", "css", "json", "bash", "sh", "shell", "sql",
+                    "plaintext", "text", "yaml", "yml", "xml", "properties", "gradle", "markdown", "md"
                 }
                 lines = chunk.splitlines()
                 if lines and lines[0].strip().lower() in known_langs:
@@ -347,7 +423,10 @@ The Lead Architect provided the following specification and code for file '{path
 {raw_content}
 
 Task:
-Extract and output the COMPLETE, fully implemented source code for '{path}', including all imports, functions, classes, and __main__ execution blocks.
+Extract and output the COMPLETE, fully implemented source code for '{path}'.
+- For Java / Spring: preserve exact package declarations, all imports, Spring annotations (@SpringBootApplication, @RestController, @Service, etc.), classes, methods.
+- For TypeScript / JavaScript: preserve all imports, export statements, type/interface declarations, functions, components.
+- For Python: preserve all imports, functions, classes, and execution blocks.
 - Strip all conversational remarks, introductory text, and markdown backtick fences.
 - Output pure code ready to be saved directly to the file.
 - Do NOT add explanations before or after the code.
@@ -406,18 +485,27 @@ def extract_and_validate_code(
 
     # 2. Ollama Chunk-by-Chunk Synthesis
     processed_files = []
+    code_extensions = {
+        ".py", ".js", ".ts", ".jsx", ".tsx", ".java",
+        ".go", ".rs", ".c", ".cpp", ".cs", ".php", ".rb"
+    }
+
     for file_entry in raw_files:
         path = file_entry.get("path", "").strip()
         raw_code = file_entry.get("content", "")
-        # Synthesize clean code via Ollama only for source code files
-        # Plain text/config files (.txt, .json, .yaml, .md, .env) don't need code synthesis
+
         raw_ext = os.path.splitext(path)[1].lower()
-        if raw_ext in [".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".go", ".rs", ".java", ".c", ".cpp"]:
+        if raw_ext in code_extensions:
             clean_code = synthesize_chunk_with_ollama(path, raw_code, turn_record=turn_record)
         else:
             clean_code = clean_code_preamble(raw_code)
             if turn_record and hasattr(turn_record, "log_ollama_chunk"):
                 turn_record.log_ollama_chunk(path, raw_code, clean_code, status="direct_text")
+
+        # Resolve Java package directory hierarchy if needed (e.g. UserController.java -> src/main/java/com/example/demo/...)
+        if path.endswith(".java"):
+            path = resolve_java_path(path, clean_code)
+
         processed_files.append({"path": path, "content": clean_code})
 
     # 3. Path Safety & Bounds Validation

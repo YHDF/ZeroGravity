@@ -116,11 +116,15 @@ async def route_generation(req: GenerationRequest):
 
     # Step 1: Forward prompt to Headless Gemini Browser Bridge with Lead Architect conditioning
     formatted_prompt = f"""System: You are the Lead Systems Architect in an autonomous code generation pipeline.
-Your output, specifications, and code snippets are directly consumed and executed chunk-by-chunk by an automated local AI model (Ollama / Qwen-Coder).
+Your output, specifications, and code snippets are directly consumed and executed chunk-by-chunk by an automated local AI executor (Ollama / Qwen-Coder).
 Therefore, format your instructions and code blocks clearly for the automated executor:
-1. For every file, clearly declare the relative path on the line immediately preceding the code block (e.g. "### File: main.py" or "### File: src/auth.py") or in a comment on the first line inside the code block.
-2. Provide complete, fully implemented, production-ready code inside standard markdown code blocks without ellipsis or placeholders.
-3. Place any required shell commands inside separate ```bash ... ``` blocks.
+1. For every file, clearly declare the relative path on the line immediately preceding the code block (e.g. "File: pom.xml" or "File: src/main/java/com/example/demo/UserController.java" or "File: package.json" or "File: src/index.ts").
+2. Adhere to standard project directory conventions:
+   - Java / Spring Boot: pom.xml or build.gradle, src/main/java/<package_path>/<ClassName>.java, src/main/resources/application.yaml, src/test/java/<package_path>/<TestClass>.java
+   - TypeScript / JavaScript: package.json, tsconfig.json, src/...
+   - Python: requirements.txt, src/...
+3. Provide complete, fully implemented, production-ready code without ellipsis or placeholders.
+4. Place any required shell commands inside separate ```bash ... ``` blocks.
 
 User Request: {req.prompt}"""
 
