@@ -1,0 +1,33 @@
+# Environment variables and secrets
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Playwright and browser profiles
+browser_profile/
+.zerogravity-profile/
+test-results/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# History and workspace data
+.gemini-history/
+workspace/
+
+# IDE / OS artifacts
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

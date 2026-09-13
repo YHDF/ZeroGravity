@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  gemini-bridge:
+    build:
+      context: ./services/browser_bridge
+      dockerfile: Dockerfile
+    container_name: gemini-bridge
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - BROWSER_PROFILE_DIR=/data/browser_profile
+      - ZEROGRAVITY_HEADLESS=${ZEROGRAVITY_HEADLESS:-true}
+      - PORT=5000
+    volumes:
+      - ~/.zerogravity-profile:/data/browser_profile
+      - ${WORKSPACE_PATH:-./workspace}:/workspace
+    networks:
+      - zerogravity-net
+
+  quota-router:
+    build:
+      context: ./services/router
+      dockerfile: Dockerfile
+    container_name: quota-router
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ZEROGRAVITY_BROWSER_URL=${ZEROGRAVITY_BROWSER_URL:-http://gemini-bridge:5000}
+      - ZEROGRAVITY_EXECUTION_MODE=${ZEROGRAVITY_EXECUTION_MODE:-direct}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5-coder:1.5b}
+      - WORKSPACE_ROOT=/workspace
+    volumes:
+      - ${WORKSPACE_PATH:-./workspace}:/workspace
+    depends_on:
+      - gemini-bridge
+      - ollama
+    networks:
+      - zerogravity-net
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - zerogravity-net
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    environment:
+      - OPENAI_API_BASE_URLS=http://quota-router:8000/v1
+      - OLLAMA_BASE_URL=http://ollama:11434
+    volumes:
+      - open_webui_data:/app/backend/data
+    depends_on:
+      - quota-router
+      - ollama
+    networks:
+      - zerogravity-net
+
+networks:
+  zerogravity-net:
+    driver: bridge
+
+volumes:
+  ollama_data:
+  open_webui_data:
