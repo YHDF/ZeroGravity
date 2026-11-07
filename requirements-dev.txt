@@ -3,5 +3,5 @@ ruff==0.8.4
 bandit[toml]==1.8.0
 pip-audit==2.7.3
 pytest==8.3.4
-pytest-cov==6.0.0
+pytest-cov==7.1.0
 
