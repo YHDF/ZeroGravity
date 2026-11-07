@@ -103,25 +103,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Trivy filesystem scan (vulnerabilities & secrets, blocking)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,secret
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
-          skip-dirs: workspace,data
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" -v "$HOME/.cache:/root/.cache/" -w /repo \
+            ghcr.io/aquasecurity/trivy:latest fs \
+            --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed \
+            --skip-dirs workspace,data --exit-code 1 .
 
       - name: Trivy IaC/misconfiguration scan (report only)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: config
-          scan-ref: .
-          severity: MEDIUM,HIGH,CRITICAL
-          exit-code: "0"
-          format: sarif
-          output: trivy-config.sarif
+        run: |
+          docker run --rm -v "$PWD:/repo" -v "$HOME/.cache:/root/.cache/" -w /repo \
+            ghcr.io/aquasecurity/trivy:latest config \
+            --severity MEDIUM,HIGH,CRITICAL --exit-code 0 \
+            --format sarif --output trivy-config.sarif .
 
       - name: Upload Trivy misconfiguration results
         if: always() && hashFiles('trivy-config.sarif') != ''
@@ -215,12 +208,10 @@ jobs:
             "import server, gemini_automator; from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print('chromium:', p.chromium.executable_path); p.stop()"
 
       - name: Trivy image scan - router (report only)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: zerogravity/quota-router:ci
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "0"
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$HOME/.cache:/root/.cache/" \
+            ghcr.io/aquasecurity/trivy:latest image \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 zerogravity/quota-router:ci
 
   # ---------------------------------------------------------------------------
   # 5. End-to-end multi-turn test-runs against the full router pipeline.
