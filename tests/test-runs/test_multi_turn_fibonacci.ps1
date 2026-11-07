@@ -140,8 +140,8 @@ if (Test-Path $historyDir) {
 }
 
 if ($allFiles.Count -ge 4) {
-    Write-Host "`n🎉 MULTI-TURN TEST PASSED: Generated $($allFiles.Count) JavaScript files across 2 turns." -ForegroundColor Green
+    Write-Host "`n[PASS] MULTI-TURN TEST PASSED: Generated $($allFiles.Count) JavaScript files across 2 turns." -ForegroundColor Green
 } else {
-    Write-Warning "`n⚠️ Expected at least 4 JS files total (>=2 per turn), found: $($allFiles.Count)"
+    Write-Warning "`n[WARN] Expected at least 4 JS files total (>=2 per turn), found: $($allFiles.Count)"
 }
 

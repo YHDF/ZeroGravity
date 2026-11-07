@@ -12,7 +12,6 @@ from browser_extractor import (
     validate_commands,
     extract_and_validate_code,
     check_syntax_sanity,
-    resolve_java_path,
 )
 
 
@@ -149,6 +148,10 @@ print("Hello ZeroGravity")
         print("Calculated numbers")
         ```
         """
+        res_c = extract_and_validate_code(raw_output_c, user_prompt="Create calc.py that prints numbers")
+        self.assertTrue(res_c.get("valid"))
+        self.assertEqual(res_c["files_to_write"][0]["path"], "calc.py")
+
         # Variant D: Multi-file extraction from Gemini Web DOM (File: <path> headers)
         raw_output_d = """
 File: requirements.txt

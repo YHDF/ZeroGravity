@@ -160,13 +160,13 @@ User Request: {req.prompt}"""
         raise HTTPException(
             status_code=504,
             detail=f"Gemini Browser Bridge timed out after {BRIDGE_HTTP_TIMEOUT}s ({type(e).__name__}).",
-        )
+        ) from e
     except httpx.RequestError as e:
         logger.error(f"Failed to communicate with browser bridge at {ZEROGRAVITY_BROWSER_URL}: {type(e).__name__}: {e}")
         raise HTTPException(
             status_code=503,
             detail=f"Gemini Browser Bridge unavailable at {ZEROGRAVITY_BROWSER_URL}: {type(e).__name__}: {e}",
-        )
+        ) from e
 
     # Step 2: Initialize telemetry turn record in .gemini-history
     turn_record = create_turn_record(req.prompt, raw_output)
@@ -302,7 +302,7 @@ async def chat_completions(payload: Dict[str, Any]):
     if res.files_written:
         written_files = [f.get("path") for f in res.files_written if f.get("status") == "success"]
         if written_files:
-            reply_content += f"\n\n---\n📁 **ZeroGravity Workspace Files Created:**\n" + "\n".join([f"- `{p}`" for p in written_files])
+            reply_content += "\n\n---\n📁 **ZeroGravity Workspace Files Created:**\n" + "\n".join([f"- `{p}`" for p in written_files])
     elif res.status == "validation_failed":
         reply_content += f"\n\n---\n⚠️ **ZeroGravity Validation Warning**: {res.validation_notes}"
 
@@ -328,4 +328,5 @@ async def chat_completions(payload: Dict[str, Any]):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Container service: must listen on all interfaces
+    uvicorn.run(app, host="0.0.0.0", port=8000)  # nosec B104

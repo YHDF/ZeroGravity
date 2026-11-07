@@ -67,16 +67,17 @@ async def generate(req: PromptRequest):
         return GenerateResponse(raw_output=raw_output, status="success")
     except RuntimeError as re:
         logger.error(f"Runtime error during prompt generation: {re}")
-        raise HTTPException(status_code=401 if "authenticated" in str(re) else 500, detail=str(re))
+        raise HTTPException(status_code=401 if "authenticated" in str(re) else 500, detail=str(re)) from re
     except TimeoutError as te:
         logger.error(f"Timeout during prompt generation: {te}")
-        raise HTTPException(status_code=504, detail=str(te))
+        raise HTTPException(status_code=504, detail=str(te)) from te
     except Exception as e:
         logger.error(f"Unexpected error during prompt generation: {e}")
-        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}") from e
 
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 5000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Container service: must listen on all interfaces
+    uvicorn.run(app, host="0.0.0.0", port=port)  # nosec B104

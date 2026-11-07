@@ -1,0 +1,22 @@
+# CI overlay: replaces the real Playwright/Gemini bridge with a mock that replays
+# recorded Gemini responses (tests/test-runs/mock_bridge/fixtures).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build quota-router mock-bridge
+#
+services:
+  mock-bridge:
+    build:
+      context: ./tests/test-runs/mock_bridge
+    container_name: mock-bridge
+    ports:
+      - "5000:5000"
+    networks:
+      - zerogravity-net
+
+  quota-router:
+    environment:
+      - ZEROGRAVITY_BROWSER_URL=http://mock-bridge:5000
+    depends_on:
+      mock-bridge:
+        condition: service_healthy
+

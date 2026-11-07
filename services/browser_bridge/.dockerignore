@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+tests/
+run_local.ps1
+

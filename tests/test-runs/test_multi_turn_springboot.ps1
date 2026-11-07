@@ -177,8 +177,8 @@ if (Test-Path $historyDir) {
 }
 
 if ($allFiles.Count -ge 8 -and $testFiles.Count -ge 1) {
-    Write-Host "`n🎉 SPRING BOOT MULTI-TURN TEST PASSED: Generated $($allFiles.Count) files across 2 turns with full package-to-directory path resolution." -ForegroundColor Green
+    Write-Host "`n[PASS] SPRING BOOT MULTI-TURN TEST PASSED: Generated $($allFiles.Count) files across 2 turns with full package-to-directory path resolution." -ForegroundColor Green
 } else {
-    Write-Warning "`n⚠️ Expected at least 8 files total and at least 1 test file. Found: $($allFiles.Count) total, $($testFiles.Count) test files."
+    Write-Warning "`n[WARN] Expected at least 8 files total and at least 1 test file. Found: $($allFiles.Count) total, $($testFiles.Count) test files."
 }
 

@@ -119,6 +119,7 @@ def main():
     ])
     t2_sec = round(time.time() - t2_start, 1)
     print(f"Turn 2 finished in {t2_sec}s")
+    print("\nAssistant Reply (preview):\n", t2_reply[:350], "...\n")
 
     all_files = [f for f in WORKSPACE_DIR.rglob("*") if f.is_file() and ".gemini-history" not in str(f)]
     test_files = [f for f in (WORKSPACE_DIR / "src" / "test").rglob("*.java")] if (WORKSPACE_DIR / "src" / "test").exists() else []

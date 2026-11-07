@@ -22,11 +22,16 @@ test-results/
 # Testing
 .pytest_cache/
 .coverage
+coverage.xml
+junit.xml
 htmlcov/
+.ruff_cache/
 
 # History and workspace data
 .gemini-history/
 workspace/
+ci-workspace/
+live-workspace/
 
 # IDE / OS artifacts
 .vscode/

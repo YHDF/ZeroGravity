@@ -135,6 +135,7 @@ def main():
         print(f"\n🎉 MULTI-TURN TEST PASSED: Generated {len(all_files)} JavaScript files across 2 turns.")
     else:
         print(f"\n⚠️ Expected >= 4 JS files total, found: {len(all_files)}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

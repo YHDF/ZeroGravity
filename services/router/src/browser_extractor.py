@@ -1,9 +1,18 @@
 import os
 import re
+import ast
 import json
 import logging
 from typing import Dict, Any, List, Optional
 import httpx
+
+# LLM output is untrusted: use defusedxml to guard against XML entity-expansion attacks
+from defusedxml import ElementTree as ET
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 logger = logging.getLogger("browser_extractor")
 logging.basicConfig(level=logging.INFO)
@@ -32,14 +41,14 @@ def clean_web_scraping_artifacts(raw_html_or_text: str) -> str:
     """Strips common web-scraping artifacts, HTML buttons, UI labels from Gemini web output."""
     if not raw_html_or_text:
         return ""
-    
+
     text = raw_html_or_text
     # Remove HTML tags if present while keeping code content
     # Handle pre/code tags specifically
     text = re.sub(r'<button[^>]*>.*?</button>', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'<div class="[^"]*action[^"]*"[^>]*>.*?</div>', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'<span class="[^"]*icon[^"]*"[^>]*>.*?</span>', '', text, flags=re.DOTALL | re.IGNORECASE)
-    
+
     # Remove HTML tags if string contains actual HTML elements (avoiding '<' and '>' comparison/arrow operators in code)
     if re.search(r'</?(?:div|span|p|br|pre|code|button|a|ul|ol|li|h[1-6]|strong|em|b|i|table|tr|td|th|section|article|header|footer)\b[^>]*>', text, flags=re.IGNORECASE):
         # Convert <br> and </p> to newlines
@@ -54,7 +63,7 @@ def clean_web_scraping_artifacts(raw_html_or_text: str) -> str:
             text,
             flags=re.IGNORECASE,
         )
-    
+
     # Clean UI text fragments
     ui_junk = ["Copy code", "Edit prompt", "Share & export", "View draft", "Show thinking"]
     for junk in ui_junk:
@@ -113,16 +122,6 @@ def validate_commands(commands: Optional[List[str]]) -> tuple[bool, str]:
             if re.search(pattern, cmd, re.IGNORECASE):
                 return False, f"Dangerous command blocked: '{cmd}' matching pattern '{pattern}'."
     return True, "Commands verified safe."
-
-
-import ast
-import json
-import xml.etree.ElementTree as ET
-
-try:
-    import yaml
-except ImportError:
-    yaml = None
 
 
 def resolve_java_path(declared_path: str, content: str) -> str:
@@ -237,16 +236,16 @@ def clean_code_preamble(content: str) -> str:
     start_idx = 0
     found = False
     for idx, line in enumerate(lines):
-        l = line.strip()
-        if not l:
+        stripped = line.strip()
+        if not stripped:
             continue
         # Skip header metadata lines like [file-tag: ...] or bare language headers
-        if re.match(r'^(?:\[file-tag:|^python$|^javascript$|^typescript$|^java$|^bash$|^html$|^css$|^json$|^yaml$|^xml$)', l, re.IGNORECASE):
+        if re.match(r'^(?:\[file-tag:|^python$|^javascript$|^typescript$|^java$|^bash$|^html$|^css$|^json$|^yaml$|^xml$)', stripped, re.IGNORECASE):
             continue
         # Check if line looks like actual code, markup, or valid comment
         if re.match(
             r'^(?:#|//|/\*|<!--|import\s+|from\s+|export\s+|package\s+|@\w+|def\s+|class\s+|public\s+|private\s+|protected\s+|const\s+|let\s+|var\s+|function\s+|type\s+|interface\s+|if\s+__name__|print\(|<[a-zA-Z0-9_\-]+|\{|\{|\[|[a-zA-Z0-9_\-]+:\s+)',
-            l
+            stripped
         ):
             start_idx = idx
             found = True
@@ -281,14 +280,14 @@ def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
 
     # Find all code blocks with their preceding context
     pattern = re.compile(r"```(?:([a-zA-Z0-9_\-]+))?(?:[ \t]+([^\n]+))?\n(.*?)```", re.DOTALL)
-    
+
     pos = 0
     idx = 0
     for match in pattern.finditer(text):
         lang = (match.group(1) or "").strip().lower()
         fence_extra = (match.group(2) or "").strip()
         content = match.group(3)
-        
+
         preceding_chunk = text[pos:match.start()]
         pos = match.end()
 
@@ -348,9 +347,9 @@ def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
         # Separate shell scripts / installation commands from regular files
         if filename.endswith(".sh") or lang in ["bash", "sh"] or any(cmd_kw in clean_content for cmd_kw in ["npm install", "pip install"]):
             for line in clean_content.splitlines():
-                l = line.strip()
-                if l and not l.startswith("#") and not l.startswith("//"):
-                    commands.append(l)
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and not stripped.startswith("//"):
+                    commands.append(stripped)
             # If it's an explicit script file, also write the file
             if filename and filename != "run.sh":
                 files.append({"path": filename, "content": clean_content})
@@ -404,7 +403,7 @@ def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
     # Fallback: only if text has real code statements (not conversational prose or system prompts)
     if not files:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
-        code_lines = [l for l in lines if re.match(r'^(?:def\s+|import\s+|from\s+\w+\s+import|class\s+|const\s+|let\s+|var\s+|function\s+|print\()', l)]
+        code_lines = [ln for ln in lines if re.match(r'^(?:def\s+|import\s+|from\s+\w+\s+import|class\s+|const\s+|let\s+|var\s+|function\s+|print\()', ln)]
         if len(code_lines) >= 2 and not any(kw in text for kw in ["### Task:", "### Guidelines:", "About Gemini", "Sign in"]):
             target_name = "main.py"
             if user_prompt:

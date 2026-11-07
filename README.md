@@ -1,5 +1,8 @@
 # ZeroGravity (`0g`)
 
+[![CI](https://github.com/YHDF/ZeroGravity/actions/workflows/ci.yml/badge.svg)](https://github.com/YHDF/ZeroGravity/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/YHDF/ZeroGravity/actions/workflows/codeql.yml/badge.svg)](https://github.com/YHDF/ZeroGravity/actions/workflows/codeql.yml)
+
 > **Zero-Token Autonomous Code Generation Pipeline** bridging Headless Gemini Web with Direct Workspace Patching.
 
 ZeroGravity (`0g`) turns Google's free Gemini Web interface into a high-capacity, autonomous code generation backend. Gemini acts as the **Lead Architect**, and a deterministic extraction pipeline turns its answer into clean source files written directly to your workspace.
@@ -204,6 +207,7 @@ docker exec ollama ollama pull qwen2.5-coder:1.5b
 │   │   ├── gemini_automator.py     # Playwright automation & shadow DOM locators
 │   │   ├── server.py               # FastAPI bridge server
 │   │   ├── run_local.ps1           # Native Windows launcher (Brave / Chrome / Edge)
+│   │   ├── tests/test_server.py    # Bridge API tests (Playwright mocked)
 │   │   └── Dockerfile
 │   └── router/                     # Router & extraction engine
 │       ├── src/
@@ -212,10 +216,52 @@ docker exec ollama ollama pull qwen2.5-coder:1.5b
 │       │   ├── history_manager.py  # .gemini-history turn logger & indexer
 │       │   └── mcp_workspace.py    # Sandbox disk write & command execution
 │       ├── tests/
+│       │   ├── test_app.py         # Router API tests (bridge faked)
 │       │   └── test_browser_extractor.py
 │       └── Dockerfile
 ├── tests/
 │   └── test-runs/                  # End-to-end multi-turn verification suites
-│       ├── test_multi_turn_fibonacci.ps1
-│       └── test_multi_turn_springboot.ps1
+│       ├── test_multi_turn_fibonacci.ps1 / .py
+│       ├── test_multi_turn_springboot.ps1 / .py
+│       └── mock_bridge/            # CI stand-in for Gemini Web (replays recorded responses)
+├── docker-compose.ci.yml           # CI overlay: swaps the real bridge for mock_bridge
+├── pyproject.toml                  # Ruff / Bandit / pytest configuration
+├── requirements-dev.txt            # Lint, security & test tooling
+└── .github/
+    ├── workflows/ci.yml            # Lint, security, unit tests, images, e2e test-runs
+    ├── workflows/codeql.yml        # CodeQL static analysis
+    ├── workflows/live-test-runs.yml# Manual live Gemini run on a self-hosted runner
+    └── dependabot.yml
 ```
+
+---
+
+## 🔁 Continuous Integration
+
+Every push to `main` and every pull request runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
+
+| Job | What it checks |
+|-----|----------------|
+| **Code quality** | Ruff lint, Python compile check, PSScriptAnalyzer (PowerShell), Hadolint (Dockerfiles), `docker compose config` for every compose variant |
+| **Security checks** | Bandit (SAST), pip-audit (vulnerable deps), Gitleaks (secrets in git history), Trivy filesystem scan (blocking on fixable HIGH/CRITICAL), Trivy IaC scan (reported to the Security tab) |
+| **Unit tests** | `router` and `browser_bridge` test suites on Python 3.11 & 3.12 with coverage + JUnit artifacts |
+| **Docker images** | Builds both images (layer-cached), runs router tests inside its image, smoke-tests Playwright Chromium in the bridge image, Trivy image scan |
+| **E2E test-runs** | Starts the real router with `docker-compose.ci.yml`, where the Gemini bridge is replaced by `mock_bridge` replaying **recorded Gemini Web responses**. Runs the multi-turn Fibonacci & Spring Boot scripts, asserts turn 1 opens a new chat and turn 2 continues it, then **executes the generated code** (`node` / `gradle test`). |
+
+Additional workflows: **CodeQL** (push, PR, weekly) and **Live test-runs**: a manual `workflow_dispatch` job that runs the same scenarios against the real Gemini Web on a self-hosted runner labelled `zerogravity-live` with an authenticated `~/.zerogravity-profile`. GitHub-hosted runners cannot sign in to Gemini.
+
+Run the same checks locally:
+```bash
+pip install -r requirements-dev.txt -r services/router/requirements.txt -r services/browser_bridge/requirements.txt
+ruff check .
+bandit -c pyproject.toml -r services tests/test-runs -ll
+(cd services/router && pytest tests) && (cd services/browser_bridge && pytest tests)
+
+# E2E with the mock bridge
+mkdir -p ci-workspace && export WORKSPACE_PATH=$PWD/ci-workspace WORKSPACE_DIR=$PWD/ci-workspace
+docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build quota-router mock-bridge
+python tests/test-runs/test_multi_turn_springboot.py
+```
+
+> [!NOTE]
+> When a recorded fixture in `tests/test-runs/mock_bridge/fixtures/` becomes outdated (e.g. after changing the prompts), refresh it from a live run's `.gemini-history/turns/*/02_gemini_architect_raw.md`.

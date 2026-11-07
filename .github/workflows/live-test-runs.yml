@@ -1,0 +1,106 @@
+# Live end-to-end test-runs against the REAL Gemini Web UI.
+#
+# GitHub-hosted runners cannot do this (no authenticated Google profile, and
+# Gemini rate-limits / challenges datacenter IPs), so this workflow targets a
+# self-hosted runner you register on a machine that has:
+#   - Docker (with `docker compose`)
+#   - Python 3.11+
+#   - An authenticated browser profile at ~/.zerogravity-profile
+#     (see data/browser_profile/README.md)
+# Register the runner with the extra label: zerogravity-live
+#
+# Trigger manually from the Actions tab ("Run workflow").
+name: Live test-runs (Gemini Web)
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Which multi-turn scenario to run
+        type: choice
+        options: [all, fibonacci, springboot]
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-test-runs # one live Gemini session at a time
+  cancel-in-progress: false
+
+jobs:
+  live:
+    name: Live test-run (${{ matrix.scenario }})
+    runs-on: [self-hosted, zerogravity-live]
+    timeout-minutes: 40
+    strategy:
+      max-parallel: 1 # the bridge serializes prompts through a single browser
+      fail-fast: false
+      matrix:
+        scenario: [fibonacci, springboot]
+    env:
+      WORKSPACE_PATH: ${{ github.workspace }}/live-workspace/${{ matrix.scenario }}
+      WORKSPACE_DIR: ${{ github.workspace }}/live-workspace/${{ matrix.scenario }}
+      ROUTER_URL: http://localhost:8000
+    steps:
+      - name: Skip scenarios not selected
+        id: gate
+        shell: bash
+        run: |
+          if [[ "${{ inputs.scenario }}" == "all" || "${{ inputs.scenario }}" == "${{ matrix.scenario }}" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - name: Start live stack
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          mkdir -p "$WORKSPACE_PATH"
+          docker compose up -d --build gemini-bridge quota-router
+          for i in $(seq 1 90); do
+            if curl -fsS "$ROUTER_URL/healthz" | grep -q '"browser_bridge_connected":true'; then exit 0; fi
+            sleep 2
+          done
+          echo "Stack did not become healthy"; docker compose logs; exit 1
+
+      - name: Run multi-turn test-run against Gemini Web
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: python tests/test-runs/test_multi_turn_${{ matrix.scenario }}.py
+
+      - name: Verify generated project (Node.js)
+        if: steps.gate.outputs.run == 'true' && matrix.scenario == 'fibonacci'
+        shell: bash
+        run: docker run --rm -v "$WORKSPACE_PATH:/app" -w /app node:20-alpine sh -c "node src/cli.js 10 && node src/benchmark.js"
+
+      - name: Verify generated project (Gradle)
+        if: steps.gate.outputs.run == 'true' && matrix.scenario == 'springboot'
+        shell: bash
+        run: |
+          docker run --rm -v "$WORKSPACE_PATH:/home/gradle/project" -w /home/gradle/project \
+            gradle:8.10-jdk17 gradle test --no-daemon --console=plain
+
+      - name: Logs
+        if: always() && steps.gate.outputs.run == 'true'
+        shell: bash
+        run: docker compose logs --no-color gemini-bridge quota-router
+
+      - name: Upload generated workspace & bridge debug captures
+        if: always() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-workspace-${{ matrix.scenario }}
+          path: live-workspace/${{ matrix.scenario }}
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always() && steps.gate.outputs.run == 'true'
+        shell: bash
+        run: docker compose down --remove-orphans
+

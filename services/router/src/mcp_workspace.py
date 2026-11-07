@@ -1,7 +1,7 @@
 import os
 import subprocess
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 logger = logging.getLogger("mcp_workspace")
 logging.basicConfig(level=logging.INFO)
@@ -42,7 +42,10 @@ def run_command(command: str, workspace_root: str = WORKSPACE_ROOT, timeout: int
         norm_workspace = os.path.abspath(workspace_root)
         os.makedirs(norm_workspace, exist_ok=True)
 
-        res = subprocess.run(
+        # Executing model-generated shell commands is the core purpose of direct mode.
+        # Commands are screened by browser_extractor.validate_commands() before reaching here
+        # and always run with cwd pinned to the workspace root.
+        res = subprocess.run(  # nosec B602
             command,
             shell=True,
             cwd=norm_workspace,

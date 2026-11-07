@@ -1,0 +1,32 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /services/router
+    schedule: { interval: weekly }
+    labels: [dependencies, router]
+
+  - package-ecosystem: pip
+    directory: /services/browser_bridge
+    schedule: { interval: weekly }
+    labels: [dependencies, browser-bridge]
+
+  - package-ecosystem: pip
+    directory: /
+    schedule: { interval: weekly }
+    labels: [dependencies, tooling]
+
+  - package-ecosystem: docker
+    directory: /services/router
+    schedule: { interval: weekly }
+    labels: [dependencies, docker]
+
+  - package-ecosystem: docker
+    directory: /services/browser_bridge
+    schedule: { interval: weekly }
+    labels: [dependencies, docker]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    labels: [dependencies, ci]
+

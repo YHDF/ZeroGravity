@@ -1,0 +1,312 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Code quality: Python lint, PowerShell lint, Dockerfile lint, compose sanity
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Code quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dev tooling
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff (Python lint)
+        run: ruff check . --output-format=github
+
+      - name: Python syntax check (all sources)
+        run: python -m compileall -q services tests
+
+      - name: PSScriptAnalyzer (PowerShell lint)
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $results = Get-ChildItem -Recurse -Filter *.ps1 -Path services, tests |
+            Invoke-ScriptAnalyzer -Severity Error, Warning -ExcludeRule PSAvoidUsingWriteHost
+          $results | Format-Table RuleName, Severity, ScriptName, Line, Message -AutoSize -Wrap
+          if ($results) { Write-Error "PSScriptAnalyzer reported $(@($results).Count) issue(s)"; exit 1 }
+
+      - name: Hadolint (Dockerfile lint)
+        run: |
+          for f in services/router/Dockerfile services/browser_bridge/Dockerfile tests/test-runs/mock_bridge/Dockerfile; do
+            echo "::group::$f"
+            docker run --rm -i hadolint/hadolint:v2.12.0 hadolint --failure-threshold error - < "$f"
+            echo "::endgroup::"
+          done
+
+      - name: Validate docker compose files
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml config --quiet
+          docker compose -f docker-compose.yml --profile local-ai config --quiet
+
+  # ---------------------------------------------------------------------------
+  # 2. Security: SAST, dependency audit, secret scanning, filesystem/IaC scan
+  # ---------------------------------------------------------------------------
+  security:
+    name: Security checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for secret scanning
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dev tooling
+        run: pip install -r requirements-dev.txt
+
+      - name: Bandit (Python SAST, medium+ severity)
+        run: bandit -c pyproject.toml -r services tests/test-runs -ll
+
+      - name: pip-audit (known vulnerable dependencies)
+        run: |
+          pip-audit --progress-spinner off -r services/router/requirements.txt
+          pip-audit --progress-spinner off -r services/browser_bridge/requirements.txt
+
+      - name: Gitleaks (secret scanning)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trivy filesystem scan (vulnerabilities & secrets, blocking)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-dirs: workspace,data
+
+      - name: Trivy IaC/misconfiguration scan (report only)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+          format: sarif
+          output: trivy-config.sarif
+
+      - name: Upload Trivy misconfiguration results
+        if: always() && hashFiles('trivy-config.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
+        continue-on-error: true # fork PRs have no security-events permission
+
+  # ---------------------------------------------------------------------------
+  # 3. Unit tests for each service (matrix over services & Python versions)
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: Unit tests (${{ matrix.service }}, py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [router, browser_bridge]
+        python: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            services/${{ matrix.service }}/requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        # The bridge tests mock Playwright entirely: only the Python package is needed, no browser download.
+        run: pip install -r requirements.txt -r ../../requirements-dev.txt
+
+      - name: Run tests with coverage
+        run: |
+          python -m pytest tests \
+            --cov=. --cov-report=term-missing --cov-report=xml:coverage.xml \
+            --junitxml=junit.xml
+
+      - name: Upload test & coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.service }}-py${{ matrix.python }}
+          path: |
+            services/${{ matrix.service }}/coverage.xml
+            services/${{ matrix.service }}/junit.xml
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # 4. Container images: build, run tests inside the image, scan
+  # ---------------------------------------------------------------------------
+  docker-build:
+    name: Docker images
+    runs-on: ubuntu-latest
+    needs: [lint, unit-tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build router image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/router
+          tags: zerogravity/quota-router:ci
+          load: true
+          cache-from: type=gha,scope=router
+          cache-to: type=gha,mode=max,scope=router
+
+      - name: Build browser bridge image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/browser_bridge
+          tags: zerogravity/gemini-bridge:ci
+          load: true
+          cache-from: type=gha,scope=bridge
+          cache-to: type=gha,mode=max,scope=bridge
+
+      - name: Run router tests inside the image
+        run: docker run --rm -e WORKSPACE_ROOT=/tmp/ws zerogravity/quota-router:ci python -m unittest discover -s tests -v
+
+      - name: Smoke test bridge image (imports & Playwright Chromium present)
+        run: |
+          docker run --rm zerogravity/gemini-bridge:ci python -c \
+            "import server, gemini_automator; from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print('chromium:', p.chromium.executable_path); p.stop()"
+
+      - name: Trivy image scan - router (report only)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: zerogravity/quota-router:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+
+  # ---------------------------------------------------------------------------
+  # 5. End-to-end multi-turn test-runs against the full router pipeline.
+  #    The Gemini bridge is replaced by a mock that replays recorded Gemini Web
+  #    responses, then the generated project is actually built & tested.
+  # ---------------------------------------------------------------------------
+  e2e-test-runs:
+    name: E2E test-run (${{ matrix.scenario }})
+    runs-on: ubuntu-latest
+    needs: [unit-tests]
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [fibonacci, springboot]
+    env:
+      WORKSPACE_PATH: ${{ github.workspace }}/ci-workspace/${{ matrix.scenario }}
+      WORKSPACE_DIR: ${{ github.workspace }}/ci-workspace/${{ matrix.scenario }}
+      ROUTER_URL: http://localhost:8000
+      COMPOSE: docker compose -f docker-compose.yml -f docker-compose.ci.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Prepare isolated workspace
+        run: mkdir -p "$WORKSPACE_PATH"
+
+      - name: Start router + mock Gemini bridge
+        run: $COMPOSE up -d --build quota-router mock-bridge
+
+      - name: Wait for router to see the bridge
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS "$ROUTER_URL/healthz" | grep -q '"browser_bridge_connected":true'; then
+              curl -fsS "$ROUTER_URL/healthz"; echo; exit 0
+            fi
+            sleep 2
+          done
+          echo "Router never became healthy"; exit 1
+
+      - name: Run multi-turn test-run script
+        run: python tests/test-runs/test_multi_turn_${{ matrix.scenario }}.py
+
+      - name: Assert multi-turn conversation semantics
+        shell: python
+        run: |
+          import json, urllib.request
+          reqs = json.load(urllib.request.urlopen("http://localhost:5000/__requests"))["requests"]
+          print(json.dumps(reqs, indent=2))
+          assert len(reqs) == 2, f"expected 2 bridge calls, got {len(reqs)}"
+          assert reqs[0]["new_chat"] is True, "turn 1 must open a fresh Gemini chat"
+          assert reqs[1]["new_chat"] is False, "turn 2 must continue the same Gemini chat"
+          assert reqs[0]["fixture"].endswith("turn1.md") and reqs[1]["fixture"].endswith("turn2.md"), reqs
+          print("Multi-turn semantics OK")
+
+      - name: Verify generated project runs (Node.js)
+        if: matrix.scenario == 'fibonacci'
+        run: |
+          NODE="docker run --rm -v $WORKSPACE_PATH:/app -w /app node:20-alpine"
+          $NODE node src/cli.js 10
+          $NODE node src/benchmark.js
+          $NODE node -e 'const {memoizedFibonacci}=require("./src/memoizedFibonacci"); if (memoizedFibonacci(40)!==102334155) { console.error("wrong result"); process.exit(1); } console.log("memoizedFibonacci(40) OK")'
+
+      - name: Verify generated project compiles & tests pass (Gradle)
+        if: matrix.scenario == 'springboot'
+        run: |
+          docker run --rm -v "$WORKSPACE_PATH:/home/gradle/project" -w /home/gradle/project \
+            gradle:8.10-jdk17 gradle test --no-daemon --console=plain
+
+      - name: Service logs
+        if: always()
+        run: $COMPOSE logs --no-color quota-router mock-bridge
+
+      - name: Upload generated workspace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-workspace-${{ matrix.scenario }}
+          path: ci-workspace/${{ matrix.scenario }}
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        run: $COMPOSE down -v --remove-orphans
+
