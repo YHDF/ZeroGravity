@@ -1,5 +1,5 @@
 # Development / CI tooling (not shipped in service images)
-ruff==0.8.4
+ruff==0.17.3
 bandit[toml]==1.8.0
 pip-audit==2.7.3
 pytest==8.3.4
