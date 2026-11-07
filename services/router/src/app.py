@@ -5,7 +5,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from browser_extractor import extract_and_validate_code
+from browser_extractor import extract_and_validate_code, LOCAL_AI_ENABLED
 from mcp_workspace import write_to_file, run_command
 from history_manager import create_turn_record, update_history_index
 
@@ -14,6 +14,9 @@ logging.basicConfig(level=logging.INFO)
 
 ZEROGRAVITY_BROWSER_URL = os.environ.get("ZEROGRAVITY_BROWSER_URL", "http://gemini-bridge:5000")
 ZEROGRAVITY_EXECUTION_MODE = os.environ.get("ZEROGRAVITY_EXECUTION_MODE", "direct") # 'direct' or 'agy'
+# Seconds the bridge may wait for Gemini to finish; the router waits longer to cover queueing (bridge serializes prompts)
+GEMINI_RESPONSE_TIMEOUT = int(os.environ.get("GEMINI_RESPONSE_TIMEOUT", "240"))
+BRIDGE_HTTP_TIMEOUT = float(os.environ.get("BRIDGE_HTTP_TIMEOUT", str(GEMINI_RESPONSE_TIMEOUT * 2 + 60)))
 
 app = FastAPI(title="ZeroGravity Router API")
 
@@ -103,6 +106,7 @@ async def healthz():
         "browser_bridge_url": ZEROGRAVITY_BROWSER_URL,
         "browser_bridge_connected": browser_healthy,
         "default_execution_mode": ZEROGRAVITY_EXECUTION_MODE,
+        "local_ai_enabled": LOCAL_AI_ENABLED,
     }
 
 
@@ -115,8 +119,13 @@ async def route_generation(req: GenerationRequest):
     exec_mode = req.execution_mode or ZEROGRAVITY_EXECUTION_MODE
 
     # Step 1: Forward prompt to Headless Gemini Browser Bridge with Lead Architect conditioning
+    consumer_desc = (
+        "an automated local AI executor (Ollama / Qwen-Coder)"
+        if LOCAL_AI_ENABLED
+        else "an automated parser that writes each code block directly to disk"
+    )
     formatted_prompt = f"""System: You are the Lead Systems Architect in an autonomous code generation pipeline.
-Your output, specifications, and code snippets are directly consumed and executed chunk-by-chunk by an automated local AI executor (Ollama / Qwen-Coder).
+Your output, specifications, and code snippets are directly consumed and executed chunk-by-chunk by {consumer_desc}.
 Therefore, format your instructions and code blocks clearly for the automated executor:
 1. For every file, clearly declare the relative path on the line immediately preceding the code block (e.g. "File: pom.xml" or "File: src/main/java/com/example/demo/UserController.java" or "File: package.json" or "File: src/index.ts").
 2. Adhere to standard project directory conventions:
@@ -133,8 +142,8 @@ User Request: {req.prompt}"""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 bridge_url,
-                json={"prompt": formatted_prompt, "new_chat": req.new_chat},
-                timeout=150.0
+                json={"prompt": formatted_prompt, "new_chat": req.new_chat, "timeout": GEMINI_RESPONSE_TIMEOUT},
+                timeout=BRIDGE_HTTP_TIMEOUT
             )
 
         if resp.status_code != 200:
@@ -146,17 +155,23 @@ User Request: {req.prompt}"""
         bridge_data = resp.json()
         raw_output = bridge_data.get("raw_output", "")
 
+    except httpx.TimeoutException as e:
+        logger.error(f"Browser bridge did not answer within {BRIDGE_HTTP_TIMEOUT}s ({type(e).__name__}).")
+        raise HTTPException(
+            status_code=504,
+            detail=f"Gemini Browser Bridge timed out after {BRIDGE_HTTP_TIMEOUT}s ({type(e).__name__}).",
+        )
     except httpx.RequestError as e:
-        logger.error(f"Failed to communicate with browser bridge at {ZEROGRAVITY_BROWSER_URL}: {e}")
+        logger.error(f"Failed to communicate with browser bridge at {ZEROGRAVITY_BROWSER_URL}: {type(e).__name__}: {e}")
         raise HTTPException(
             status_code=503,
-            detail=f"Gemini Browser Bridge unavailable at {ZEROGRAVITY_BROWSER_URL}: {e}",
+            detail=f"Gemini Browser Bridge unavailable at {ZEROGRAVITY_BROWSER_URL}: {type(e).__name__}: {e}",
         )
 
     # Step 2: Initialize telemetry turn record in .gemini-history
     turn_record = create_turn_record(req.prompt, raw_output)
 
-    # Step 3: Pass scraped output to Ollama chunk synthesis & validation pipeline
+    # Step 3: Extract code blocks (optional Ollama synthesis if ZEROGRAVITY_LOCAL_AI=true) & validate
     extracted_data = extract_and_validate_code(
         raw_output,
         workspace_context=req.workspace_context,

@@ -12,6 +12,11 @@ services:
     environment:
       - BROWSER_PROFILE_DIR=/data/browser_profile
       - ZEROGRAVITY_HEADLESS=${ZEROGRAVITY_HEADLESS:-true}
+      - GEMINI_RESPONSE_TIMEOUT=${GEMINI_RESPONSE_TIMEOUT:-240}
+      - BRIDGE_DEBUG_DIR=/workspace/.gemini-history/bridge_debug
+      # NOTE: BROWSER_EXECUTABLE_PATH / BROWSER_CHANNEL are intentionally NOT passed here.
+      # The container only ships Playwright's bundled Chromium; host browsers (Brave, Chrome,
+      # Edge) are only usable when running the bridge natively (see services/browser_bridge/run_local.ps1).
       - PORT=5000
     volumes:
       - ~/.zerogravity-profile:/data/browser_profile
@@ -28,23 +33,29 @@ services:
     ports:
       - "8000:8000"
     environment:
+      # Use http://host.docker.internal:5000 when the bridge runs natively on the host
       - ZEROGRAVITY_BROWSER_URL=${ZEROGRAVITY_BROWSER_URL:-http://gemini-bridge:5000}
       - ZEROGRAVITY_EXECUTION_MODE=${ZEROGRAVITY_EXECUTION_MODE:-direct}
+      - GEMINI_RESPONSE_TIMEOUT=${GEMINI_RESPONSE_TIMEOUT:-240}
+      # Optional local AI (Ollama) stage - disabled by default
+      - ZEROGRAVITY_LOCAL_AI=${ZEROGRAVITY_LOCAL_AI:-false}
       - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5-coder:1.5b}
       - WORKSPACE_ROOT=/workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ${WORKSPACE_PATH:-./workspace}:/workspace
-    depends_on:
-      - gemini-bridge
-      - ollama
     networks:
       - zerogravity-net
 
+  # Optional local AI module. Disabled by default; start with:
+  #   docker compose --profile local-ai up -d   (and set ZEROGRAVITY_LOCAL_AI=true)
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
     restart: unless-stopped
+    profiles: ["local-ai"]
     ports:
       - "11434:11434"
     volumes:
@@ -60,12 +71,12 @@ services:
       - "3000:8080"
     environment:
       - OPENAI_API_BASE_URLS=http://quota-router:8000/v1
+      - ENABLE_OLLAMA_API=${ZEROGRAVITY_LOCAL_AI:-false}
       - OLLAMA_BASE_URL=http://ollama:11434
     volumes:
       - open_webui_data:/app/backend/data
     depends_on:
       - quota-router
-      - ollama
     networks:
       - zerogravity-net
 

@@ -8,6 +8,10 @@ import httpx
 logger = logging.getLogger("browser_extractor")
 logging.basicConfig(level=logging.INFO)
 
+# Optional local AI (Ollama) post-processing stage. Disabled by default:
+# code blocks extracted from Gemini are cleaned deterministically and written as-is.
+# Set ZEROGRAVITY_LOCAL_AI=true (and start the 'local-ai' compose profile) to re-enable.
+LOCAL_AI_ENABLED = os.environ.get("ZEROGRAVITY_LOCAL_AI", "false").strip().lower() in ("1", "true", "yes", "on")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:1.5b")
 WORKSPACE_ROOT = os.environ.get("WORKSPACE_ROOT", "/workspace")
@@ -36,15 +40,20 @@ def clean_web_scraping_artifacts(raw_html_or_text: str) -> str:
     text = re.sub(r'<div class="[^"]*action[^"]*"[^>]*>.*?</div>', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'<span class="[^"]*icon[^"]*"[^>]*>.*?</span>', '', text, flags=re.DOTALL | re.IGNORECASE)
     
-    # Remove HTML tags if string contains HTML elements
-    if "<" in text and ">" in text:
+    # Remove HTML tags if string contains actual HTML elements (avoiding '<' and '>' comparison/arrow operators in code)
+    if re.search(r'</?(?:div|span|p|br|pre|code|button|a|ul|ol|li|h[1-6]|strong|em|b|i|table|tr|td|th|section|article|header|footer)\b[^>]*>', text, flags=re.IGNORECASE):
         # Convert <br> and </p> to newlines
         text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
         text = re.sub(r'</p>', '\n\n', text, flags=re.IGNORECASE)
         # Strip remaining HTML tags except code blocks if any
         text = re.sub(r'<pre><code[^>]*>', '```\n', text, flags=re.IGNORECASE)
         text = re.sub(r'</code></pre>', '\n```', text, flags=re.IGNORECASE)
-        text = re.sub(r'<[^>]+>', '', text)
+        text = re.sub(
+            r'</?(?:div|span|p|br|pre|code|button|a|ul|ol|li|h[1-6]|strong|em|b|i|table|tr|td|th|section|article|header|footer)\b[^>\n]*>',
+            '',
+            text,
+            flags=re.IGNORECASE,
+        )
     
     # Clean UI text fragments
     ui_junk = ["Copy code", "Edit prompt", "Share & export", "View draft", "Show thinking"]
@@ -188,7 +197,7 @@ def check_syntax_sanity(filepath: str, content: str) -> tuple[bool, str]:
 
 def extract_filename_from_context(preceding_text: str, first_line_of_code: str, lang: str, index: int, user_prompt: str = "") -> Optional[str]:
     """Detects filename from preceding text, first line of code, or prompt."""
-    filename_pattern = r'([a-zA-Z0-9_\-./]+\.(?:py|js|ts|jsx|tsx|html|css|json|sh|bash|md|txt|yml|yaml|toml|sql|env|dockerfile|Dockerfile))'
+    filename_pattern = r'([a-zA-Z0-9_\-./]+\.(?:json|jsx|js|tsx|ts|yaml|yml|html|css|py|sh|bash|md|txt|toml|sql|java|xml|gradle|properties|env|dockerfile|Dockerfile)(?![a-zA-Z0-9_]))'
 
     # 1. Check first line of code block (e.g. # main.py or // src/utils.ts or # filepath: main.py)
     if first_line_of_code:
@@ -264,7 +273,7 @@ def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
         "html": ".html", "css": ".css",
         "json": ".json", "sh": ".sh", "bash": ".sh",
         "yaml": ".yaml", "yml": ".yml",
-        "xml": ".xml", "properties": ".properties", "gradle": ".gradle",
+        "xml": ".xml", "properties": ".properties", "gradle": ".gradle", "groovy": ".gradle",
         "markdown": ".md", "md": ".md",
         "text": ".txt", "txt": ".txt",
         "sql": ".sql",
@@ -323,6 +332,8 @@ def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
                 filename = "application.yaml" if any(k in text.lower() for k in ["spring", "server:"]) else "config.yaml"
             elif default_ext == ".json":
                 filename = "package.json" if "dependencies" in clean_content else f"data_{idx+1}.json"
+            elif default_ext == ".gradle":
+                filename = "build.gradle"
             elif default_ext == ".xml":
                 filename = "pom.xml" if "modelVersion" in clean_content else f"config_{idx+1}.xml"
             elif default_ext == ".html":
@@ -472,8 +483,9 @@ def extract_and_validate_code(
 ) -> Dict[str, Any]:
     """
     Extracts code blocks and commands from Gemini browser output.
-    Sends extracted chunks through local Ollama for clean synthesis,
-    logging telemetry to turn_record.
+    If the optional local AI stage is enabled (ZEROGRAVITY_LOCAL_AI=true), code chunks
+    are sent through local Ollama for clean synthesis; otherwise they are cleaned
+    deterministically. Telemetry is logged to turn_record.
     """
     cleaned_input = clean_web_scraping_artifacts(raw_browser_output)
 
@@ -483,7 +495,7 @@ def extract_and_validate_code(
     commands = extracted.get("commands_to_run", [])
     explanation = extracted.get("explanation", "Extracted code files.")
 
-    # 2. Ollama Chunk-by-Chunk Synthesis
+    # 2. Chunk-by-Chunk Cleanup (optional Ollama synthesis when LOCAL_AI_ENABLED)
     processed_files = []
     code_extensions = {
         ".py", ".js", ".ts", ".jsx", ".tsx", ".java",
@@ -495,7 +507,7 @@ def extract_and_validate_code(
         raw_code = file_entry.get("content", "")
 
         raw_ext = os.path.splitext(path)[1].lower()
-        if raw_ext in code_extensions:
+        if LOCAL_AI_ENABLED and raw_ext in code_extensions:
             clean_code = synthesize_chunk_with_ollama(path, raw_code, turn_record=turn_record)
         else:
             clean_code = clean_code_preamble(raw_code)

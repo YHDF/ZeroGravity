@@ -74,6 +74,7 @@ print("Hello ZeroGravity")
         valid, msg = validate_commands(["npm test", "python -m unittest discover"])
         self.assertTrue(valid)
 
+    @patch("browser_extractor.LOCAL_AI_ENABLED", True)
     @patch("browser_extractor.httpx.post")
     def test_extract_and_validate_code_with_ollama_mock(self, mock_post):
         mock_response = MagicMock()
@@ -90,6 +91,18 @@ print("Hello ZeroGravity")
         self.assertEqual(len(result.get("files_to_write", [])), 1)
         self.assertEqual(result["files_to_write"][0]["path"], "src/main.py")
         self.assertEqual(result["files_to_write"][0]["content"], "print('hello from ollama')")
+
+    @patch("browser_extractor.LOCAL_AI_ENABLED", False)
+    @patch("browser_extractor.httpx.post")
+    def test_extract_and_validate_code_local_ai_disabled(self, mock_post):
+        raw_output = "<button>Copy code</button><pre><code class=\"language-python\"># src/main.py\nprint('raw code')</code></pre>"
+        result = extract_and_validate_code(raw_output)
+
+        mock_post.assert_not_called()
+        self.assertTrue(result.get("valid"))
+        self.assertEqual(len(result.get("files_to_write", [])), 1)
+        self.assertEqual(result["files_to_write"][0]["path"], "src/main.py")
+        self.assertIn("print('raw code')", result["files_to_write"][0]["content"])
 
     def test_extract_and_validate_code_path_traversal_rejected(self):
         raw_output = """
@@ -271,6 +284,53 @@ mvn clean test
         self.assertIn("src/test/java/com/example/demo/controller/UserControllerTest.java", paths)
         self.assertIn("mvn clean test", res.get("commands_to_run", []))
 
+    def test_gradle_spring_boot_package_resolution(self):
+        raw_gradle = """
+File: build.gradle
+```groovy
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.2.0'
+}
+```
+
+File: TaskController.java
+```java
+package com.example.taskmanager.controller;
+
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class TaskController {}
+```
+
+File: TaskRepository.java
+```java
+package com.example.taskmanager.repository;
+
+public interface TaskRepository {}
+```
+
+File: TaskControllerTest.java
+```java
+package com.example.taskmanager.controller;
+
+import org.junit.jupiter.api.Test;
+
+public class TaskControllerTest {
+    @Test
+    void testList() {}
+}
+```
+"""
+        res = extract_and_validate_code(raw_gradle)
+        self.assertTrue(res.get("valid"))
+        paths = [f["path"] for f in res["files_to_write"]]
+        self.assertIn("build.gradle", paths)
+        self.assertIn("src/main/java/com/example/taskmanager/controller/TaskController.java", paths)
+        self.assertIn("src/main/java/com/example/taskmanager/repository/TaskRepository.java", paths)
+        self.assertIn("src/test/java/com/example/taskmanager/controller/TaskControllerTest.java", paths)
+
     def test_yaml_json_syntax_validation(self):
         # Valid YAML
         valid, msg = check_syntax_sanity("application.yaml", "server:\n  port: 8080\n")
@@ -305,8 +365,100 @@ mvn clean test
         valid, msg = validate_commands(safe_cmds)
         self.assertTrue(valid)
 
+    def test_multi_turn_javascript_fibonacci_extraction(self):
+        # Turn 1: package.json + Two JS files (fibonacci.js with `< 0` and cli.js with `> 0`)
+        turn1_raw = """
+Certainly! Here is the modular Fibonacci project:
+
+File: package.json
+```json
+{
+  "name": "modular-fibonacci",
+  "version": "1.0.0",
+  "main": "src/cli.js"
+}
+```
+
+File: src/fibonacci.js
+```javascript
+function fibonacci(n) {
+    if (typeof n !== 'number' || n < 0 || !Number.isInteger(n)) {
+        throw new Error('Input must be a non-negative integer');
+    }
+    if (n <= 1) return n;
+    let a = 0, b = 1;
+    for (let i = 2; i <= n; i++) {
+        let temp = a + b;
+        a = b;
+        b = temp;
+    }
+    return b;
+}
+
+module.exports = { fibonacci };
+```
+
+File: src/cli.js
+```javascript
+const { fibonacci } = require('./fibonacci');
+
+const args = process.argv.slice(2);
+const n = args.length > 0 ? parseInt(args[0], 10) : 10;
+console.log(`Fibonacci(${n}) = ${fibonacci(n)}`);
+```
+"""
+        res1 = extract_and_validate_code(turn1_raw)
+        self.assertTrue(res1.get("valid"))
+        self.assertGreaterEqual(len(res1.get("files_to_write", [])), 3)
+        paths1 = [f["path"] for f in res1["files_to_write"]]
+        self.assertIn("package.json", paths1)
+        self.assertNotIn("package.js", paths1)
+        self.assertIn("src/fibonacci.js", paths1)
+        self.assertIn("src/cli.js", paths1)
+
+        # Turn 2: Two new JS files (memoizedFibonacci.js and benchmark.js)
+        turn2_raw = """
+Now expanding with memoization and benchmarking:
+
+File: src/memoizedFibonacci.js
+```javascript
+const memo = new Map();
+
+function memoizedFibonacci(n) {
+    if (n <= 1) return n;
+    if (memo.has(n)) return memo.get(n);
+    const result = memoizedFibonacci(n - 1) + memoizedFibonacci(n - 2);
+    memo.set(n, result);
+    return result;
+}
+
+module.exports = { memoizedFibonacci };
+```
+
+File: src/benchmark.js
+```javascript
+const { fibonacci } = require('./fibonacci');
+const { memoizedFibonacci } = require('./memoizedFibonacci');
+
+console.time('Standard');
+fibonacci(35);
+console.timeEnd('Standard');
+
+console.time('Memoized');
+memoizedFibonacci(35);
+console.timeEnd('Memoized');
+```
+"""
+        res2 = extract_and_validate_code(turn2_raw)
+        self.assertTrue(res2.get("valid"))
+        self.assertGreaterEqual(len(res2.get("files_to_write", [])), 2)
+        paths2 = [f["path"] for f in res2["files_to_write"]]
+        self.assertIn("src/memoizedFibonacci.js", paths2)
+        self.assertIn("src/benchmark.js", paths2)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

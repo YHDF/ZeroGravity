@@ -139,7 +139,7 @@ def update_history_index(record: TurnRecord, workspace_root: str = WORKSPACE_ROO
     # Update human-readable history_index.md
     table_rows = [
         "# ZeroGravity Generation Telemetry Log\n",
-        "This directory tracks the handoff between Gemini (Lead Architect) and Ollama (Executor).\n",
+        "This directory tracks the handoff between Gemini (Lead Architect) and the code extractor (optional Ollama executor).\n",
         "| Turn | Timestamp | Prompt Summary | Raw Chars | Ollama Chunks | Files Written | Details |",
         "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
     ]

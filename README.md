@@ -1,12 +1,15 @@
 # ZeroGravity (`0g`)
 
-> **Zero-Token Autonomous Code Generation Pipeline** bridging Headless Gemini Web with Local Ollama Code Synthesis and Direct Workspace Patching.
+> **Zero-Token Autonomous Code Generation Pipeline** bridging Headless Gemini Web with Direct Workspace Patching.
 
-ZeroGravity (`0g`) turns Google's free Gemini Web interface into a high-capacity, autonomous code generation backend. By pairing Gemini as a **Lead Architect** with a local **Ollama** model as a **Code Executor & Compiler**, ZeroGravity produces clean, production-ready source code files written directly to your workspace.
+ZeroGravity (`0g`) turns Google's free Gemini Web interface into a high-capacity, autonomous code generation backend. Gemini acts as the **Lead Architect**, and a deterministic extraction pipeline turns its answer into clean source files written directly to your workspace.
+
+> [!NOTE]
+> **The local AI module (Ollama) is disabled by default.** Code blocks returned by Gemini are cleaned by a deterministic parser and written as-is — no local model, no GPU, no extra container. The Ollama stage is still available as an opt-in (see [Optional: Local AI Module](#-optional-local-ai-module-ollama)).
 
 ---
 
-## 🏛️ Two-Tier Architecture
+## 🏛️ Architecture
 
 ```mermaid
 sequenceDiagram
@@ -15,7 +18,6 @@ sequenceDiagram
     participant Bridge as Gemini-Bridge (:5000)
     participant Web as Gemini Web (Playwright)
     participant Hist as Workspace/.gemini-history/
-    participant Ollama as Local Ollama (:11434)
     participant Disk as Target Workspace (/workspace)
 
     UI->>Router: POST /v1/chat/completions
@@ -25,25 +27,21 @@ sequenceDiagram
     Web-->>Bridge: Streamed markdown response
     Bridge-->>Router: Clean text extraction
     Router->>Hist: Initialize turn (01_user_prompt.md, 02_gemini_architect_raw.md)
-    loop Chunk-by-Chunk Synthesis
-        Router->>Ollama: Synthesize chunk (strip fluff, emit pure code)
-        Ollama-->>Router: Pristine code content
-        Router->>Hist: Log to 03_ollama_executor_log.json
-    end
+    Note over Router: Deterministic chunk extraction & cleanup (optional Ollama pass if enabled)
+    Router->>Hist: Log chunks to 03_ollama_executor_log.json
     Router->>Disk: Write files directly to workspace (e.g. main.py)
     Router->>Hist: Finalize turn (04_applied_files.md & history_index.md)
     Router-->>UI: Full response + workspace files applied
 ```
 
 ### 1. Gemini Web: The Lead Architect
-* Prompted with explicit awareness that its instructions and code blocks are being consumed by an automated local AI executor.
+* Prompted with explicit awareness that its code blocks are parsed automatically and written straight to disk.
 * Outputs high-level architectural designs, full file implementations, and shell execution commands.
 
-### 2. Local Ollama: The Code Compiler & Executor
-* Ingests each code section/chunk from Gemini's output.
-* Uses `qwen2.5-coder:1.5b` to strip conversational fluff, markdown backticks, and introductory commentary.
-* Outputs pristine, compilable code ready to write directly to disk.
-* Failsafe: If Ollama is offline or times out, a deterministic regex parser guarantees valid code blocks are never lost.
+### 2. Deterministic Extractor (default)
+* Splits Gemini's answer into per-file chunks using `File: <path>` markers and fenced code blocks.
+* Strips web-scraping artifacts, language tags, and conversational preambles.
+* Validates paths, syntax, and commands before anything touches disk.
 
 ### 3. OpenWebUI Internal Interceptor
 * Filters out OpenWebUI's automatic background meta-prompts (tag generation, follow-up suggestions, chat titles) and answers them in `<1ms`, preventing background tasks from triggering generation or modifying workspace files.
@@ -69,9 +67,12 @@ Every interaction is archived in `target-app/.gemini-history/` for complete audi
     └── turn_001_20260913_184145/
         ├── 01_user_prompt.md            <-- Exact user prompt from OpenWebUI
         ├── 02_gemini_architect_raw.md   <-- Raw clean text from Gemini Web
-        ├── 03_ollama_executor_log.json  <-- Chunk-by-chunk Ollama inputs & outputs
+        ├── 03_ollama_executor_log.json  <-- Per-chunk input/output (status "direct_text" when local AI is off)
         └── 04_applied_files.md          <-- Summary of created/updated files on disk
 ```
+
+> [!NOTE]
+> The `03_ollama_executor_log.json` filename and "Ollama Chunks" column are kept for backwards compatibility; with the local AI module disabled they record the deterministic cleanup of each chunk.
 
 ### Telemetry Index Table Example (`history_index.md`):
 
@@ -85,7 +86,7 @@ Every interaction is archived in `target-app/.gemini-history/` for complete audi
 
 ### 1. Prerequisites
 * [Docker Desktop](https://www.docker.com/) with Docker Compose.
-* Google account logged into Chrome profile or pre-authenticated in `~/.zerogravity-profile`.
+* Google account pre-authenticated in `~/.zerogravity-profile` (see step 4).
 
 ### 2. Environment Setup
 Copy the example environment file:
@@ -97,7 +98,7 @@ Configure your target workspace path in `.env`:
 ```env
 WORKSPACE_PATH=../target-app
 ZEROGRAVITY_HEADLESS=true
-OLLAMA_MODEL=qwen2.5-coder:1.5b
+ZEROGRAVITY_LOCAL_AI=false
 ```
 
 ### 3. Start the Stack
@@ -106,10 +107,11 @@ docker compose up -d
 ```
 
 Services started:
-* **`gemini-bridge`**: Headless Playwright browser automation on port `5000`.
-* **`quota-router`**: FastAPI router & two-tier orchestration engine on port `8000`.
-* **`ollama`**: Local code synthesis model server on port `11434`.
+* **`gemini-bridge`**: Headless Playwright browser automation on port `5000` (bundled Chromium).
+* **`quota-router`**: FastAPI router & extraction engine on port `8000`.
 * **`open-webui`**: Web chat interface on `http://localhost:3000`.
+
+The `ollama` service is **not** started by default (it lives in the `local-ai` compose profile).
 
 ### 4. Authenticate Gemini Web (One-time)
 If your profile directory (`~/.zerogravity-profile`) is not yet authenticated:
@@ -117,6 +119,54 @@ If your profile directory (`~/.zerogravity-profile`) is not yet authenticated:
 2. Restart the bridge: `docker compose up -d gemini-bridge`.
 3. Complete the Google Sign-In manually in the launched browser window.
 4. Set `ZEROGRAVITY_HEADLESS=true` and restart.
+
+> [!TIP]
+> A headed browser inside a Linux container has no visible window on Windows/macOS. It is usually easier to sign in once with the **native bridge** below using `-Headed`; the same `~/.zerogravity-profile` folder is then reused by the Docker bridge.
+
+---
+
+## 🦁 Using Your Own Browser (Brave / Chrome / Edge) — Native Bridge
+
+The Docker bridge only ships Playwright's bundled Chromium, so `BROWSER_EXECUTABLE_PATH` and `BROWSER_CHANNEL` are **ignored in Docker**. To drive a browser installed on your machine, run the bridge natively on Windows and keep the rest of the stack in Docker:
+
+```powershell
+# 1. Start the bridge on the host (creates services/browser_bridge/.venv on first run)
+cd services\browser_bridge
+.\run_local.ps1 -BrowserExecutable "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" -Headed
+#   or: .\run_local.ps1 -Channel chrome      (installed Chrome)
+#   or: .\run_local.ps1 -Channel msedge      (installed Edge)
+```
+
+```env
+# 2. In .env, point the router at the host bridge
+ZEROGRAVITY_BROWSER_URL=http://host.docker.internal:5000
+```
+
+```bash
+# 3. Start only the remaining services (don't start the Docker bridge — port 5000 would clash)
+docker compose up -d quota-router open-webui
+```
+
+> [!WARNING]
+> Use a dedicated profile folder (default: `~/.zerogravity-profile`). Pointing `-ProfileDir` at your everyday Brave/Chrome `User Data` folder fails while that browser is open, because Chromium locks its profile.
+
+---
+
+## 🧠 Optional: Local AI Module (Ollama)
+
+Disabled by default. When enabled, every code chunk (`.py`, `.js`, `.ts`, `.java`, …) is additionally passed through a local Ollama model (`qwen2.5-coder:1.5b`) to strip leftover prose before being written. If Ollama is unreachable, the deterministic parser is used as a fallback.
+
+To enable it:
+```env
+ZEROGRAVITY_LOCAL_AI=true
+OLLAMA_MODEL=qwen2.5-coder:1.5b
+```
+```bash
+docker compose --profile local-ai up -d
+docker exec ollama ollama pull qwen2.5-coder:1.5b
+```
+
+`GET http://localhost:8000/healthz` reports `"local_ai_enabled"` so you can confirm the active mode.
 
 ---
 
@@ -130,7 +180,7 @@ If your profile directory (`~/.zerogravity-profile`) is not yet authenticated:
    ```
 4. Check your target workspace (`target-app/`):
    * `main.py` is written directly to disk.
-   * `.gemini-history/` logs the full conversation, Gemini's response, and Ollama's code synthesis.
+   * `.gemini-history/` logs the full conversation, Gemini's response, and per-chunk extraction.
 
 ---
 
@@ -147,20 +197,25 @@ If your profile directory (`~/.zerogravity-profile`) is not yet authenticated:
 
 ```text
 0g/
-├── docker-compose.yml              # Multi-container orchestration
+├── docker-compose.yml              # Multi-container orchestration (ollama in 'local-ai' profile)
 ├── .env.example                    # Configuration template
 ├── services/
 │   ├── browser_bridge/             # Headless Gemini Web automation
 │   │   ├── gemini_automator.py     # Playwright automation & shadow DOM locators
 │   │   ├── server.py               # FastAPI bridge server
+│   │   ├── run_local.ps1           # Native Windows launcher (Brave / Chrome / Edge)
 │   │   └── Dockerfile
-│   └── router/                     # Two-tier router & synthesis engine
+│   └── router/                     # Router & extraction engine
 │       ├── src/
 │       │   ├── app.py              # OpenAI-compatible API & OpenWebUI interceptor
-│       │   ├── browser_extractor.py# Chunking, Ollama synthesis & regex fallback
+│       │   ├── browser_extractor.py# Chunking, deterministic cleanup & optional Ollama synthesis
 │       │   ├── history_manager.py  # .gemini-history turn logger & indexer
 │       │   └── mcp_workspace.py    # Sandbox disk write & command execution
 │       ├── tests/
 │       │   └── test_browser_extractor.py
 │       └── Dockerfile
+├── tests/
+│   └── test-runs/                  # End-to-end multi-turn verification suites
+│       ├── test_multi_turn_fibonacci.ps1
+│       └── test_multi_turn_springboot.ps1
 ```

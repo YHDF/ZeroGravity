@@ -13,7 +13,9 @@ venv/
 .venv/
 
 # Playwright and browser profiles
-browser_profile/
+data/browser_profile/*
+!data/browser_profile/README.md
+!data/browser_profile/*.example.*
 .zerogravity-profile/
 test-results/
 

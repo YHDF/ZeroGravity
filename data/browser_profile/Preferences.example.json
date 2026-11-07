@@ -1,0 +1,18 @@
+{
+  "profile": {
+    "name": "ZeroGravity Gemini Profile",
+    "avatar_index": 0,
+    "exit_type": "Normal"
+  },
+  "browser": {
+    "has_seen_welcome_page": true,
+    "check_default_browser": false
+  },
+  "intl": {
+    "selected_languages": "en-US,en"
+  },
+  "session": {
+    "restore_on_startup": 1
+  }
+}
+

@@ -1,5 +1,6 @@
 import os
 import logging
+from typing import Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -28,7 +29,7 @@ app = FastAPI(title="ZeroGravity Gemini Web Bridge API", lifespan=lifespan)
 
 class PromptRequest(BaseModel):
     prompt: str
-    timeout: int = 120
+    timeout: Optional[int] = None  # defaults to GEMINI_RESPONSE_TIMEOUT (240s)
     new_chat: bool = False
 
 
@@ -41,15 +42,18 @@ class GenerateResponse(BaseModel):
 async def healthz():
     try:
         auth_status = await automator.is_authenticated()
+        signed_in = await automator.is_signed_in()
         return {
             "status": "ok",
             "authenticated": auth_status,
+            "signed_in": signed_in,
             "browser_active": automator.context is not None,
         }
     except Exception as e:
         return {
             "status": "error",
             "authenticated": False,
+            "signed_in": False,
             "error": str(e),
         }
 
@@ -64,6 +68,9 @@ async def generate(req: PromptRequest):
     except RuntimeError as re:
         logger.error(f"Runtime error during prompt generation: {re}")
         raise HTTPException(status_code=401 if "authenticated" in str(re) else 500, detail=str(re))
+    except TimeoutError as te:
+        logger.error(f"Timeout during prompt generation: {te}")
+        raise HTTPException(status_code=504, detail=str(te))
     except Exception as e:
         logger.error(f"Unexpected error during prompt generation: {e}")
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
