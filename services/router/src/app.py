@@ -92,7 +92,20 @@ async def execute_direct_patch(extracted_data: Dict[str, Any]) -> tuple[List[Dic
         cmd_root = os.path.join(cmd_root, project_name)
 
     for cmd in extracted_data.get("commands_to_run", []):
-        res = run_command(cmd, workspace_root=cmd_root)
+        norm_cmd = cmd.strip()
+        if project_name:
+            # Commands already execute inside /workspace/<project_name>; skip redundant `cd <project_name>`
+            # and strip `<project_name>/` prefixes from paths like `mkdir -p <project_name>/src`
+            if re.match(rf"^cd\s+['\"]?(?:\./|/workspace/)?{re.escape(project_name)}/?['\"]?\s*$", norm_cmd):
+                continue
+            norm_cmd = re.sub(
+                rf"(?<=\s)(?:\./|/workspace/)?{re.escape(project_name)}/",
+                "",
+                norm_cmd,
+            )
+            if re.match(rf"^mkdir\s+(?:-p\s+)?['\"]?(?:\./|/workspace/)?{re.escape(project_name)}/?['\"]?\s*$", norm_cmd):
+                continue
+        res = run_command(norm_cmd, workspace_root=cmd_root)
         commands_executed.append(res)
 
     return files_written, commands_executed
@@ -190,7 +203,7 @@ Therefore, format your instructions and code blocks clearly for the automated ex
    - TypeScript / JavaScript: package.json, tsconfig.json, src/...
    - Python: requirements.txt, src/...
 3. Provide complete, fully implemented, production-ready code without ellipsis or placeholders.
-4. Place any required shell commands inside separate ```bash ... ``` blocks.
+4. Place any required shell commands inside separate ```bash ... ``` blocks (commands run directly inside the project root directory, so do not `mkdir <project-name>` or `cd <project-name>`).
 
 User Request: {req.prompt}"""
 

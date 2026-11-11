@@ -12,6 +12,7 @@ logging.basicConfig(level=logging.INFO)
 GEMINI_URL = "https://gemini.google.com/app"
 DEFAULT_PROFILE_DIR = os.environ.get("BROWSER_PROFILE_DIR", "/data/browser_profile")
 DEFAULT_HEADLESS = os.environ.get("ZEROGRAVITY_HEADLESS", "true").lower() == "true"
+DEFAULT_MANUAL_SUBMIT = os.environ.get("ZEROGRAVITY_MANUAL_SUBMIT", "false").lower() == "true"
 DEFAULT_EXECUTABLE_PATH = os.environ.get("BROWSER_EXECUTABLE_PATH") or os.environ.get("ZEROGRAVITY_BROWSER_EXECUTABLE")
 DEFAULT_CHANNEL = os.environ.get("BROWSER_CHANNEL") or os.environ.get("ZEROGRAVITY_BROWSER_CHANNEL")
 # Max seconds to wait for Gemini to finish streaming a response (long multi-file answers can take minutes)
@@ -39,6 +40,7 @@ RESPONSE_COUNT_SELECTORS = (
 USER_QUERY_SELECTOR = 'user-query, .user-query-container, [data-test-id="user-query"]'
 # Visible while Gemini is still generating
 STOP_BUTTON_SELECTORS = [
+    'gem-icon-button.send-button.stop',
     'button[aria-label*="Stop response"]',
     'button[aria-label*="Stop generating"]',
     'button[aria-label*="Stop"]',
@@ -81,12 +83,14 @@ class GeminiAutomator:
         self,
         profile_dir: str = DEFAULT_PROFILE_DIR,
         headless: bool = DEFAULT_HEADLESS,
+        manual_submit: bool = DEFAULT_MANUAL_SUBMIT,
         executable_path: Optional[str] = DEFAULT_EXECUTABLE_PATH,
         channel: Optional[str] = DEFAULT_CHANNEL,
         debug_dir: str = DEFAULT_DEBUG_DIR,
     ):
         self.profile_dir = profile_dir
-        self.headless = headless
+        self.headless = False if manual_submit else headless
+        self.manual_submit = manual_submit
         self.executable_path = executable_path
         self.channel = channel
         self.debug_dir = debug_dir
@@ -132,16 +136,15 @@ class GeminiAutomator:
 
     async def _watch_headed_signin(self):
         """Background watcher in headed mode: saves storage_state.json as soon as Google sign-in completes."""
-        logged_once = False
         while self.context and not self.headless:
             try:
-                if await self.is_signed_in():
-                    if await self._save_storage_state() and not logged_once:
+                if not self._lock.locked() and await self.is_signed_in():
+                    if await self._save_storage_state():
                         logger.info(
                             f"[Google Sign-In Detected] Session cookies saved to {self._storage_state_path()}. "
                             "You can now press Ctrl+C and run in headless mode!"
                         )
-                        logged_once = True
+                        break
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -159,6 +162,7 @@ class GeminiAutomator:
         logger.info(
             f"Starting Playwright with profile dir: {self.profile_dir}, "
             f"headless: {self.headless}, "
+            f"manual_submit: {self.manual_submit}, "
             f"executable_path: {self.executable_path}, "
             f"channel: {self.channel}"
         )
@@ -364,7 +368,7 @@ class GeminiAutomator:
                                 if (block) {
                                     const dec = block.querySelector('.code-block-decoration span, .code-block-decoration');
                                     if (dec && dec.textContent) {
-                                        lang = dec.textContent.trim().split(/\s+/)[0].toLowerCase();
+                                        lang = dec.textContent.trim().split(/[\s,;:/]+/)[0].replace(/[^a-z0-9_+#-]/gi, '').toLowerCase();
                                     }
                                 }
                                 if (!lang && codeEl && codeEl.className) {
@@ -372,7 +376,11 @@ class GeminiAutomator:
                                     if (m) lang = m[1].toLowerCase();
                                 }
                                 const codeText = (codeEl ? codeEl.textContent : pre.textContent) || '';
-                                const fenceNode = document.createTextNode('\n```' + lang + '\n' + codeText.trim() + '\n```\n');
+                                let fence = '```';
+                                while (codeText.includes(fence)) {
+                                    fence += '`';
+                                }
+                                const fenceNode = document.createTextNode('\n' + fence + lang + '\n' + codeText.trim() + '\n' + fence + '\n');
                                 pre.parentNode.insertBefore(fenceNode, pre);
                                 hiddenEls.push([pre, pre.style.display]);
                                 pre.style.display = 'none';
@@ -444,8 +452,54 @@ class GeminiAutomator:
         except Exception:
             return ""
 
-    async def send_prompt(self, prompt_text: str, timeout: Optional[int] = None, new_chat: bool = False) -> str:
+    async def _set_manual_submit_banner(self, visible: bool):
+        if not self.page:
+            return
+        try:
+            await self.page.evaluate(
+                """(show) => {
+                    const id = 'zg-manual-submit-banner';
+                    const existing = document.getElementById(id);
+                    if (!show) {
+                        if (existing) existing.remove();
+                        return;
+                    }
+                    if (existing) return;
+                    const banner = document.createElement('div');
+                    banner.id = id;
+                    banner.textContent = 'ZeroGravity: Prompt ready — press Enter or click Send';
+                    Object.assign(banner.style, {
+                        position: 'fixed',
+                        top: '12px',
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        zIndex: '2147483647',
+                        background: '#1a73e8',
+                        color: '#ffffff',
+                        padding: '8px 16px',
+                        borderRadius: '999px',
+                        fontFamily: 'system-ui, sans-serif',
+                        fontSize: '14px',
+                        fontWeight: '600',
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+                        pointerEvents: 'none',
+                    });
+                    document.body.appendChild(banner);
+                }""",
+                visible,
+            )
+        except Exception:
+            pass
+
+    async def send_prompt(
+        self,
+        prompt_text: str,
+        timeout: Optional[int] = None,
+        new_chat: bool = False,
+        manual_submit: Optional[bool] = None,
+    ) -> str:
         timeout = timeout or DEFAULT_RESPONSE_TIMEOUT
+        use_manual_submit = self.manual_submit if manual_submit is None else manual_submit
         async with self._lock:
             if not self.page:
                 await self._start_unlocked()
@@ -491,94 +545,110 @@ class GeminiAutomator:
                 await self.capture_debug("no_input")
                 raise RuntimeError("Could not locate prompt input element on Gemini page.")
 
-            # 3. Focus and insert prompt using native contenteditable command
+            # 3. Focus and populate prompt into the input box
+            if use_manual_submit:
+                try:
+                    await self.page.bring_to_front()
+                except Exception:
+                    pass
+
             input_elem = self.page.locator(input_selector).first
             await input_elem.click(force=True, timeout=5000)
             await asyncio.sleep(0.2)
 
-            # Insert text via execCommand which updates Angular/ProseMirror/Quill models reliably for any prompt size
-            await self.page.evaluate("""(text) => {
-                const el = document.querySelector('rich-textarea div[contenteditable="true"]') || document.querySelector('div[contenteditable="true"]');
-                if (el) {
-                    el.focus();
-                    document.execCommand('selectAll', false, null);
-                    document.execCommand('insertText', false, text);
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-            }""", prompt_text)
-            await asyncio.sleep(0.5)
+            await self.page.keyboard.press("Control+A")
+            await self.page.keyboard.press("Delete")
+            await asyncio.sleep(0.15)
+            await self.page.keyboard.insert_text(prompt_text)
+            await asyncio.sleep(0.3)
 
-            # Verify the prompt actually landed in the editor; fall back to native keyboard insertion
             if not await self._read_input_text(input_selector):
-                logger.warning("Prompt not detected in input after execCommand; retrying with keyboard.insert_text.")
-                await input_elem.click(force=True, timeout=5000)
-                await self.page.keyboard.insert_text(prompt_text)
-                await asyncio.sleep(0.5)
-                if not await self._read_input_text(input_selector):
-                    await self.capture_debug("prompt_not_inserted")
-                    raise RuntimeError("Failed to insert prompt text into Gemini input box.")
+                await self.capture_debug("prompt_not_inserted")
+                raise RuntimeError("Failed to insert prompt text into Gemini input box.")
 
-            # Ensure no late overlay popped up before clicking send
-            await self._dismiss_overlays()
-
-            # 4. Submit: click send button
-            send_clicked = False
-            for btn_sel in [
-                'button[aria-label*="Send message"]',
-                'gem-icon-button.send-button button',
-                'button.send-button',
-                'button[aria-label*="Send"]',
-                'button[aria-label*="Submit"]',
-                '.send-button-container button',
-            ]:
+            # 4. Submit: either wait for user (ZEROGRAVITY_MANUAL_SUBMIT=true) or submit automatically
+            if use_manual_submit:
+                await self._set_manual_submit_banner(True)
+                logger.info(
+                    f"[MANUAL SUBMIT MODE] Prompt populated ({len(prompt_text)} chars). "
+                    f"Waiting up to {timeout}s for you to press Enter or click Send in the browser window..."
+                )
+                wait_start = asyncio.get_event_loop().time()
+                submitted = False
+                last_wait_log = wait_start
                 try:
-                    btn = self.page.locator(btn_sel).first
-                    if await btn.count() > 0 and await btn.is_visible():
-                        disabled_attr = await btn.get_attribute("aria-disabled")
-                        if disabled_attr == "true":
-                            continue
-                        try:
-                            await btn.click(timeout=3000)
-                        except Exception:
-                            await btn.evaluate("el => el.click()")
-                        send_clicked = True
-                        logger.info(f"Clicked send button: {btn_sel}")
-                        break
-                except Exception:
-                    pass
+                    while (asyncio.get_event_loop().time() - wait_start) < timeout:
+                        query_count = await self.page.locator(USER_QUERY_SELECTOR).count()
+                        resp_count = await self._response_count()
+                        generating = await self._is_generating()
+                        if query_count > prev_query_count or resp_count > prev_response_count or generating:
+                            submitted = True
+                            logger.info("[MANUAL SUBMIT MODE] Submission detected! Waiting for Gemini response stream...")
+                            break
+                        now = asyncio.get_event_loop().time()
+                        if now - last_wait_log >= 15:
+                            last_wait_log = now
+                            logger.info(
+                                f"[MANUAL SUBMIT MODE] Still waiting for manual Enter/Send "
+                                f"({int(now - wait_start)}s / {timeout}s)..."
+                            )
+                        await asyncio.sleep(0.4)
+                finally:
+                    await self._set_manual_submit_banner(False)
 
-            if not send_clicked:
-                logger.info("Send button not clicked directly; pressing Enter.")
+                if not submitted:
+                    raise TimeoutError(
+                        f"Timed out after {timeout}s waiting for manual prompt submission in browser window "
+                        "(ZEROGRAVITY_MANUAL_SUBMIT=true)."
+                    )
+                start_time = asyncio.get_event_loop().time()
+            else:
                 await self.page.keyboard.press("Enter")
+                logger.info("Submitted prompt via Enter key press.")
+                await asyncio.sleep(1.5)
+                if await self._read_input_text(input_selector):
+                    for btn_sel in [
+                        'button[aria-label*="Send message"]',
+                        'gem-icon-button.send-button button',
+                        'button.send-button',
+                        '.send-button-container button',
+                    ]:
+                        try:
+                            btn = self.page.locator(btn_sel).first
+                            if await btn.count() > 0 and await btn.is_visible():
+                                if await btn.get_attribute("aria-disabled") == "true":
+                                    continue
+                                await btn.click(timeout=3000)
+                                logger.info(f"Enter did not submit; clicked send button: {btn_sel}")
+                                break
+                        except Exception:
+                            pass
+
+                # 5. Wait for stream to start and confirm Gemini registered the submission
+                start_time = asyncio.get_event_loop().time()
+                await asyncio.sleep(2.0)
+
+                try:
+                    query_count = await self.page.locator(USER_QUERY_SELECTOR).count()
+                    remaining_input = await self._read_input_text(input_selector)
+                    logger.info(
+                        f"Post-submit check: prev_queries={prev_query_count}, now_queries={query_count}, "
+                        f"remaining_input_len={len(remaining_input)}"
+                    )
+                    if query_count <= prev_query_count and len(remaining_input) > 0:
+                        logger.warning(
+                            f"Prompt still in input box after submit ({len(remaining_input)} chars). Retrying with Enter..."
+                        )
+                        await input_elem.click(timeout=3000)
+                        await asyncio.sleep(0.2)
+                        await self.page.keyboard.press("Enter")
+                except Exception as retry_err:
+                    logger.warning(f"Post-submit check error: {retry_err}")
 
             logger.info(
                 f"Prompt submitted ({len(prompt_text)} chars, prev responses: {prev_response_count}, "
                 f"timeout: {timeout}s). Waiting for new response stream..."
             )
-
-            # 5. Wait for stream to start and stabilize
-            start_time = asyncio.get_event_loop().time()
-            await asyncio.sleep(2.5)
-
-            # Confirm Gemini registered the submission (a new user-query bubble or input box cleared)
-            try:
-                query_count = await self.page.locator(USER_QUERY_SELECTOR).count()
-                remaining_input = await self._read_input_text(input_selector)
-                if query_count <= prev_query_count and len(remaining_input) > 20:
-                    logger.warning(
-                        f"Prompt still in input box after submit (queries before={prev_query_count}, now={query_count}). "
-                        "Dismissing any overlays and retrying submit..."
-                    )
-                    await self._dismiss_overlays()
-                    btn = self.page.locator('button[aria-label*="Send message"], .send-button-container button').first
-                    if await btn.count() > 0:
-                        await btn.evaluate("el => el.click()")
-                    else:
-                        await input_elem.focus()
-                        await self.page.keyboard.press("Enter")
-            except Exception:
-                pass
 
             last_len = -1
             stable_count = 0

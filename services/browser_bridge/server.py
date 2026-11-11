@@ -31,6 +31,7 @@ class PromptRequest(BaseModel):
     prompt: str
     timeout: Optional[int] = None  # defaults to GEMINI_RESPONSE_TIMEOUT (240s)
     new_chat: bool = False
+    manual_submit: Optional[bool] = None
 
 
 class GenerateResponse(BaseModel):
@@ -47,6 +48,7 @@ async def healthz():
             "status": "ok",
             "authenticated": auth_status,
             "signed_in": signed_in,
+            "manual_submit": automator.manual_submit,
             "browser_active": automator.context is not None,
         }
     except Exception as e:
@@ -54,6 +56,7 @@ async def healthz():
             "status": "error",
             "authenticated": False,
             "signed_in": False,
+            "manual_submit": automator.manual_submit,
             "error": str(e),
         }
 
@@ -63,7 +66,10 @@ async def generate(req: PromptRequest):
     if not req.prompt or not req.prompt.strip():
         raise HTTPException(status_code=400, detail="Prompt must not be empty.")
     try:
-        raw_output = await automator.send_prompt(req.prompt, timeout=req.timeout, new_chat=req.new_chat)
+        kwargs = {"timeout": req.timeout, "new_chat": req.new_chat}
+        if req.manual_submit is not None:
+            kwargs["manual_submit"] = req.manual_submit
+        raw_output = await automator.send_prompt(req.prompt, **kwargs)
         return GenerateResponse(raw_output=raw_output, status="success")
     except RuntimeError as re:
         logger.error(f"Runtime error during prompt generation: {re}")

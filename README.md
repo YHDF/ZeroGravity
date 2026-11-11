@@ -42,8 +42,9 @@ sequenceDiagram
 * Outputs high-level architectural designs, full file implementations, and shell execution commands.
 
 ### 2. Deterministic Extractor (default)
-* Splits Gemini's answer into per-file chunks using `File: <path>` markers and fenced code blocks.
-* Strips web-scraping artifacts, language tags, and conversational preambles.
+* Splits Gemini's answer into isolated per-file sections using `File: <path>` markers and fenced code blocks (3+ backticks), ensuring nested code blocks inside `README.md` or non-standard fence tags never corrupt subsequent files.
+* Automatically restores Python package `__init__.py` paths when Markdown formatting strips double underscores (`File: src/init.py` -> `src/__init__.py`) and supports dotfiles such as `.env.example`.
+* Strips web-scraping artifacts, language tags, and conversational preambles, and normalizes project-scoped shell commands.
 * Validates paths, syntax, and commands before anything touches disk.
 
 ### 3. OpenWebUI Internal Interceptor
@@ -157,10 +158,14 @@ If you have Python installed on the host and specifically want to drive a host-i
 
 ```powershell
 # 1. Start the bridge natively on the host (requires local Python 3.11+)
-cd services\browser_bridge
-.\run_local.ps1 -Native -BrowserExecutable "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" -Headed
-#   or: .\run_local.ps1 -Native -Channel chrome
-#   or: .\run_local.ps1 -Native -Channel msedge
+.\services\browser_bridge\run_local.ps1 -Native -BrowserExecutable "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" -Headed
+#   or: .\services\browser_bridge\run_local.ps1 -Native -Channel chrome -ProfileDir "$HOME\.zerogravity-profile" -Headed
+#   or: .\services\browser_bridge\run_local.ps1 -Native -Channel msedge -Headed
+
+# For Google Workspace / Enterprise accounts where automated submission is held by BotGuard,
+# add -ManualSubmit (or ZEROGRAVITY_MANUAL_SUBMIT=true): the bridge populates the prompt and
+# waits for you to press Enter or click Send in the browser window, then extracts the reply automatically:
+.\services\browser_bridge\run_local.ps1 -Native -Channel chrome -ProfileDir "$HOME\.zerogravity-profile" -ManualSubmit
 ```
 
 ```env

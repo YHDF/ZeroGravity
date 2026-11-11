@@ -18,6 +18,7 @@
 param(
     [string]$ProfileDir = "",
     [switch]$Headed,
+    [switch]$ManualSubmit,
     [int]$Port = 5000,
     [int]$NoVncPort = 6080,
     [switch]$Native,
@@ -27,6 +28,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+
+$manualSubmitVal = if ($ManualSubmit -or ($env:ZEROGRAVITY_MANUAL_SUBMIT -eq "true")) { "true" } else { "false" }
+if ($manualSubmitVal -eq "true") {
+    $Headed = $true
+}
 
 if (-not $ProfileDir) {
     $ProfileDir = Join-Path $RepoRoot "data\browser_profile"
@@ -55,12 +61,16 @@ if (-not $Native -and -not $BrowserExecutable -and -not $Channel) {
     }
 
     # Stop any existing gemini-bridge container using the same name/port
-    docker rm -f gemini-bridge 2>$null | Out-Null
+    $existingContainer = docker ps -a --filter "name=^gemini-bridge$" -q
+    if ($existingContainer) {
+        docker rm -f gemini-bridge | Out-Null
+    }
 
     Write-Host "======================================================================" -ForegroundColor Cyan
     Write-Host "Starting Dockerized Gemini Bridge on http://localhost:$Port" -ForegroundColor Green
-    Write-Host "  profile : $ResolvedProfileDir"
-    Write-Host "  headless: $headlessVal"
+    Write-Host "  profile      : $ResolvedProfileDir"
+    Write-Host "  headless     : $headlessVal"
+    Write-Host "  manualSubmit : $manualSubmitVal"
     if ($Headed) {
         $vncUrl = "http://localhost:$NoVncPort/vnc.html?autoconnect=true&resize=scale"
         Write-Host "  login UI: $vncUrl" -ForegroundColor Yellow
@@ -76,19 +86,21 @@ if (-not $Native -and -not $BrowserExecutable -and -not $Channel) {
     $dockerArgs = @(
         "run", "--rm", "-it",
         "--name", "gemini-bridge",
+        "--shm-size=1g",
         "-p", "${Port}:5000",
         "-p", "${NoVncPort}:6080",
         "-e", "BROWSER_PROFILE_DIR=/data/browser_profile",
         "-e", "ZEROGRAVITY_HEADLESS=$headlessVal",
+        "-e", "ZEROGRAVITY_MANUAL_SUBMIT=$manualSubmitVal",
         "-e", "PORT=5000",
         "-e", "NOVNC_PORT=6080",
         "-v", "${ResolvedProfileDir}:/data/browser_profile",
         "-v", "${ResolvedWorkspaceDir}:/workspace"
     )
     if (Test-Path (Join-Path $RepoRoot "docker-compose.yml")) {
-        $netExists = docker network ls --filter "name=zerogravity-net" -q
-        if ($netExists) {
-            $dockerArgs += @("--network", "0g_zerogravity-net")
+        $netName = (docker network ls --filter "name=zerogravity-net" --format "{{.Name}}" | Select-Object -First 1)
+        if ($netName) {
+            $dockerArgs += @("--network", $netName)
         }
     }
     $dockerArgs += $imageName
@@ -125,12 +137,14 @@ try {
     $env:BROWSER_EXECUTABLE_PATH = $BrowserExecutable
     $env:BROWSER_CHANNEL = $Channel
     $env:ZEROGRAVITY_HEADLESS = if ($Headed) { "false" } else { "true" }
+    $env:ZEROGRAVITY_MANUAL_SUBMIT = $manualSubmitVal
     $env:PORT = "$Port"
 
     Write-Host "Starting Native Gemini bridge on http://localhost:$Port"
-    Write-Host "  profile : $ResolvedProfileDir"
-    Write-Host "  browser : $(if ($BrowserExecutable) { $BrowserExecutable } elseif ($Channel) { "channel=$Channel" } else { 'bundled Chromium' })"
-    Write-Host "  headless: $($env:ZEROGRAVITY_HEADLESS)"
+    Write-Host "  profile      : $ResolvedProfileDir"
+    Write-Host "  browser      : $(if ($BrowserExecutable) { $BrowserExecutable } elseif ($Channel) { "channel=$Channel" } else { 'bundled Chromium' })"
+    Write-Host "  headless     : $($env:ZEROGRAVITY_HEADLESS)"
+    Write-Host "  manualSubmit : $($env:ZEROGRAVITY_MANUAL_SUBMIT)"
 
     & $python server.py
 } finally {

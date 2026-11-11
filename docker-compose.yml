@@ -8,12 +8,14 @@ services:
       dockerfile: Dockerfile
     container_name: gemini-bridge
     restart: unless-stopped
+    shm_size: "1gb"
     ports:
       - "5000:5000"
       - "6080:6080"
     environment:
       - BROWSER_PROFILE_DIR=/data/browser_profile
       - ZEROGRAVITY_HEADLESS=${ZEROGRAVITY_HEADLESS:-true}
+      - ZEROGRAVITY_MANUAL_SUBMIT=${ZEROGRAVITY_MANUAL_SUBMIT:-false}
       - GEMINI_RESPONSE_TIMEOUT=${GEMINI_RESPONSE_TIMEOUT:-240}
       - BRIDGE_DEBUG_DIR=/workspace/.gemini-history/bridge_debug
       # NOTE: BROWSER_EXECUTABLE_PATH / BROWSER_CHANNEL are intentionally NOT passed here.
