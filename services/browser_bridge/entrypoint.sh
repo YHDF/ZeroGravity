@@ -24,4 +24,8 @@ if [[ "${ZEROGRAVITY_HEADLESS:-true}" == "false" ]]; then
     echo "======================================================================"
 fi
 
+if [[ $# -gt 0 ]]; then
+    exec "$@"
+fi
+
 exec python server.py

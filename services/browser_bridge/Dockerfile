@@ -27,3 +27,4 @@ ENV NOVNC_PORT=6080
 EXPOSE 5000 6080
 
 ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["python", "server.py"]
