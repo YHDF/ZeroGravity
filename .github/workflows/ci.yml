@@ -168,7 +168,7 @@ jobs:
 
       - name: Upload test & coverage reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-reports-${{ matrix.service }}-py${{ matrix.python }}
           path: |
@@ -321,7 +321,7 @@ jobs:
 
       - name: Upload generated workspace
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-workspace-${{ matrix.scenario }}
           path: ci-workspace/${{ matrix.scenario }}
