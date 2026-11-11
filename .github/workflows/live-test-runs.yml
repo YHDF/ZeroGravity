@@ -18,7 +18,7 @@ on:
       scenario:
         description: Which multi-turn scenario to run
         type: choice
-        options: [all, fibonacci, springboot]
+        options: [all, fibonacci, typescript, python, springboot]
         default: all
 
 permissions:
@@ -37,7 +37,19 @@ jobs:
       max-parallel: 1 # the bridge serializes prompts through a single browser
       fail-fast: false
       matrix:
-        scenario: [fibonacci, springboot]
+        include:
+          - scenario: fibonacci
+            folder: javascript
+            script: test_multi_turn_fibonacci.py
+          - scenario: typescript
+            folder: typescript
+            script: test_multi_turn_typescript.py
+          - scenario: python
+            folder: python
+            script: test_multi_turn_python.py
+          - scenario: springboot
+            folder: springboot
+            script: test_multi_turn_springboot.py
     env:
       WORKSPACE_PATH: ${{ github.workspace }}/live-workspace/${{ matrix.scenario }}
       WORKSPACE_DIR: ${{ github.workspace }}/live-workspace/${{ matrix.scenario }}
@@ -71,12 +83,22 @@ jobs:
       - name: Run multi-turn test-run against Gemini Web
         if: steps.gate.outputs.run == 'true'
         shell: bash
-        run: python tests/test-runs/test_multi_turn_${{ matrix.scenario }}.py
+        run: python tests/test-runs/${{ matrix.folder }}/${{ matrix.script }}
 
       - name: Verify generated project (Node.js)
         if: steps.gate.outputs.run == 'true' && matrix.scenario == 'fibonacci'
         shell: bash
         run: docker run --rm -v "$WORKSPACE_PATH:/app" -w /app node:20-alpine sh -c "node src/cli.js 10 && node src/benchmark.js"
+
+      - name: Verify generated project (TypeScript)
+        if: steps.gate.outputs.run == 'true' && matrix.scenario == 'typescript'
+        shell: bash
+        run: docker run --rm -v "$WORKSPACE_PATH:/app" -w /app node:20-alpine sh -c "npm install --no-audit --no-fund && npm test && npm start"
+
+      - name: Verify generated project (Python)
+        if: steps.gate.outputs.run == 'true' && matrix.scenario == 'python'
+        shell: bash
+        run: docker run --rm -v "$WORKSPACE_PATH:/app" -w /app python:3.11-slim sh -c "python src/cli.py && python -m unittest discover -s tests -p 'test_*.py' -v"
 
       - name: Verify generated project (Gradle)
         if: steps.gate.outputs.run == 'true' && matrix.scenario == 'springboot'

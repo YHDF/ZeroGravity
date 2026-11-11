@@ -52,6 +52,13 @@ jobs:
           $results | Format-Table RuleName, Severity, ScriptName, Line, Message -AutoSize -Wrap
           if ($results) { Write-Error "PSScriptAnalyzer reported $(@($results).Count) issue(s)"; exit 1 }
 
+      - name: Bash syntax check (all .sh scripts)
+        run: |
+          for f in services/browser_bridge/entrypoint.sh services/browser_bridge/run_local.sh tests/test-runs/*/*.sh; do
+            sed -i 's/\r$//' "$f"
+            bash -n "$f"
+          done
+
       - name: Hadolint (Dockerfile lint)
         run: |
           for f in services/router/Dockerfile services/browser_bridge/Dockerfile tests/test-runs/mock_bridge/Dockerfile; do
@@ -226,7 +233,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [fibonacci, springboot]
+        include:
+          - scenario: fibonacci
+            folder: javascript
+            script: test_multi_turn_fibonacci.py
+          - scenario: typescript
+            folder: typescript
+            script: test_multi_turn_typescript.py
+          - scenario: python
+            folder: python
+            script: test_multi_turn_python.py
+          - scenario: springboot
+            folder: springboot
+            script: test_multi_turn_springboot.py
     env:
       WORKSPACE_PATH: ${{ github.workspace }}/ci-workspace/${{ matrix.scenario }}
       WORKSPACE_DIR: ${{ github.workspace }}/ci-workspace/${{ matrix.scenario }}
@@ -256,7 +275,7 @@ jobs:
           echo "Router never became healthy"; exit 1
 
       - name: Run multi-turn test-run script
-        run: python tests/test-runs/test_multi_turn_${{ matrix.scenario }}.py
+        run: python tests/test-runs/${{ matrix.folder }}/${{ matrix.script }}
 
       - name: Assert multi-turn conversation semantics
         shell: python
@@ -277,6 +296,18 @@ jobs:
           $NODE node src/cli.js 10
           $NODE node src/benchmark.js
           $NODE node -e 'const {memoizedFibonacci}=require("./src/memoizedFibonacci"); if (memoizedFibonacci(40)!==102334155) { console.error("wrong result"); process.exit(1); } console.log("memoizedFibonacci(40) OK")'
+
+      - name: Verify generated project compiles & tests pass (TypeScript)
+        if: matrix.scenario == 'typescript'
+        run: |
+          docker run --rm -v "$WORKSPACE_PATH:/app" -w /app node:20-alpine \
+            sh -c "npm install --no-audit --no-fund && npm test && npm start"
+
+      - name: Verify generated project runs & tests pass (Python)
+        if: matrix.scenario == 'python'
+        run: |
+          python "$WORKSPACE_PATH/src/cli.py"
+          python -m unittest discover -s "$WORKSPACE_PATH/tests" -p "test_*.py" -v
 
       - name: Verify generated project compiles & tests pass (Gradle)
         if: matrix.scenario == 'springboot'

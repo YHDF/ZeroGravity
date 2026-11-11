@@ -23,6 +23,10 @@ FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures
 ROUTES = [
     ("fibonacci_turn2.md", ["memoizedFibonacci"]),
     ("fibonacci_turn1.md", ["Fibonacci"]),
+    ("typescript_turn2.md", ["PriorityQueue", "filterByPriority"]),
+    ("typescript_turn1.md", ["PriorityQueue"]),
+    ("python_turn2.md", ["LRUCache", "stats"]),
+    ("python_turn1.md", ["LRUCache"]),
     ("springboot_turn2.md", ["TaskNotFoundException"]),
     ("springboot_turn1.md", ["Task Management"]),
 ]

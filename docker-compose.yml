@@ -2,6 +2,7 @@ version: '3.8'
 
 services:
   gemini-bridge:
+    image: zerogravity/gemini-bridge:local
     build:
       context: ./services/browser_bridge
       dockerfile: Dockerfile
@@ -9,6 +10,7 @@ services:
     restart: unless-stopped
     ports:
       - "5000:5000"
+      - "6080:6080"
     environment:
       - BROWSER_PROFILE_DIR=/data/browser_profile
       - ZEROGRAVITY_HEADLESS=${ZEROGRAVITY_HEADLESS:-true}
@@ -18,8 +20,9 @@ services:
       # The container only ships Playwright's bundled Chromium; host browsers (Brave, Chrome,
       # Edge) are only usable when running the bridge natively (see services/browser_bridge/run_local.ps1).
       - PORT=5000
+      - NOVNC_PORT=6080
     volumes:
-      - ~/.zerogravity-profile:/data/browser_profile
+      - ${BROWSER_PROFILE_HOST_DIR:-./data/browser_profile}:/data/browser_profile
       - ${WORKSPACE_PATH:-./workspace}:/workspace
     networks:
       - zerogravity-net
@@ -42,6 +45,7 @@ services:
       - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5-coder:1.5b}
       - WORKSPACE_ROOT=/workspace
+      - HOST_WORKSPACE_PATH=${WORKSPACE_PATH:-./workspace}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

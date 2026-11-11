@@ -22,8 +22,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $WorkspaceDir) {
-    if (Test-Path "$PSScriptRoot\..\..\workspace") {
-        $WorkspaceDir = (Resolve-Path "$PSScriptRoot\..\..\workspace").Path
+    if (Test-Path "$PSScriptRoot\..\..\..\workspace") {
+        $WorkspaceDir = (Resolve-Path "$PSScriptRoot\..\..\..\workspace").Path
     } else {
         $WorkspaceDir = "$PSScriptRoot\workspace"
     }
@@ -108,7 +108,8 @@ Write-Host "`nWorkspace files after Turn 1 ($($turn1Files.Count) found):" -Foreg
 $turn1Files | ForEach-Object { Write-Host "  - $($_.FullName)" -ForegroundColor White }
 
 # Check that package directory mapping worked for Java files
-$javaMainFiles = Get-ChildItem -Path "$WorkspaceDir\src\main\java" -Recurse -Filter "*.java" -ErrorAction SilentlyContinue
+$javaMainFiles = Get-ChildItem -Path $WorkspaceDir -Recurse -Filter "*.java" -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -match "src[\\/]main[\\/]java" }
 Write-Host "Resolved src/main/java files ($($javaMainFiles.Count) found):" -ForegroundColor Cyan
 $javaMainFiles | ForEach-Object { Write-Host "    [OK] $($_.FullName.Replace($WorkspaceDir, ''))" -ForegroundColor Green }
 
@@ -163,7 +164,8 @@ Write-Host "`nTotal workspace files after Turn 2 ($($allFiles.Count) found):" -F
 $allFiles | ForEach-Object { Write-Host "  - $($_.FullName)" -ForegroundColor White }
 
 # Check test directory mapping
-$testFiles = Get-ChildItem -Path "$WorkspaceDir\src\test\java" -Recurse -Filter "*.java" -ErrorAction SilentlyContinue
+$testFiles = Get-ChildItem -Path $WorkspaceDir -Recurse -Filter "*.java" -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -match "src[\\/]test[\\/]java" }
 Write-Host "`nResolved src/test/java files ($($testFiles.Count) found):" -ForegroundColor Cyan
 $testFiles | ForEach-Object { Write-Host "    [OK] $($_.FullName.Replace($WorkspaceDir, ''))" -ForegroundColor Green }
 

@@ -115,6 +115,9 @@ class TestRouterApi(unittest.TestCase):
         self.assertTrue(os.path.isdir(os.path.join(_TMP_WORKSPACE, ".gemini-history")))
 
     def test_follow_up_turn_continues_same_chat(self):
+        stale_file = os.path.join(_TMP_WORKSPACE, "turn1_file.txt")
+        with open(stale_file, "w", encoding="utf-8") as fh:
+            fh.write("keep me on turn 2")
         payload = {
             "model": "zerogravity",
             "messages": [
@@ -125,6 +128,42 @@ class TestRouterApi(unittest.TestCase):
         }
         self.client.post("/v1/chat/completions", json=payload)
         self.assertFalse(_FakeAsyncClient.calls[0]["json"]["new_chat"])
+        self.assertTrue(os.path.isfile(stale_file), "follow-up turns must preserve existing workspace files")
+
+    def test_auto_project_subfolder_when_workspace_is_root(self):
+        _FakeAsyncClient.reply = (
+            "Project: ts-priority-queue\n\n"
+            "File: src/hello.py\n"
+            "```python\ndef greet(name):\n    return f'Hello {name}'\n```\n"
+        )
+        with patch.dict(os.environ, {"HOST_WORKSPACE_PATH": "./workspace"}):
+            res1 = self.client.post(
+                "/v1/chat/completions",
+                json={"model": "zerogravity", "messages": [{"role": "user", "content": "Create src/hello.py"}]},
+            )
+            self.assertEqual(res1.status_code, 200)
+            turn1_reply = res1.json()["choices"][0]["message"]["content"]
+            self.assertIn("ZeroGravity Project Folder:", turn1_reply)
+            self.assertTrue(os.path.isfile(os.path.join(_TMP_WORKSPACE, "ts-priority-queue", "src", "hello.py")))
+
+            # Turn 2 in same conversation should automatically write into the same project folder
+            _FakeAsyncClient.reply = (
+                "File: src/extra.py\n"
+                "```python\nX = 42\n```\n"
+            )
+            res2 = self.client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "zerogravity",
+                    "messages": [
+                        {"role": "user", "content": "Create src/hello.py"},
+                        {"role": "assistant", "content": turn1_reply},
+                        {"role": "user", "content": "Now add src/extra.py"},
+                    ],
+                },
+            )
+            self.assertEqual(res2.status_code, 200)
+            self.assertTrue(os.path.isfile(os.path.join(_TMP_WORKSPACE, "ts-priority-queue", "src", "extra.py")))
 
     def test_bridge_unreachable_returns_503(self):
         _FakeAsyncClient.raise_exc = httpx.ConnectError("refused")

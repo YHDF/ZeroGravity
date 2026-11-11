@@ -20,8 +20,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $WorkspaceDir) {
-    if (Test-Path "$PSScriptRoot\..\..\workspace") {
-        $WorkspaceDir = (Resolve-Path "$PSScriptRoot\..\..\workspace").Path
+    if (Test-Path "$PSScriptRoot\..\..\..\workspace") {
+        $WorkspaceDir = (Resolve-Path "$PSScriptRoot\..\..\..\workspace").Path
     } else {
         $WorkspaceDir = "$PSScriptRoot\workspace"
     }

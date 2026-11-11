@@ -14,7 +14,7 @@ import urllib.error
 from pathlib import Path
 
 ROUTER_URL = os.environ.get("ROUTER_URL", "http://localhost:8000")
-repo_ws = Path(__file__).resolve().parent.parent.parent / "workspace"
+repo_ws = Path(__file__).resolve().parents[3] / "workspace"
 default_ws = repo_ws if repo_ws.exists() else Path(__file__).parent / "workspace"
 WORKSPACE_DIR = Path(os.environ.get("WORKSPACE_DIR", default_ws))
 
@@ -122,7 +122,7 @@ def main():
     print("\nAssistant Reply (preview):\n", t2_reply[:350], "...\n")
 
     all_files = [f for f in WORKSPACE_DIR.rglob("*") if f.is_file() and ".gemini-history" not in str(f)]
-    test_files = [f for f in (WORKSPACE_DIR / "src" / "test").rglob("*.java")] if (WORKSPACE_DIR / "src" / "test").exists() else []
+    test_files = [f for f in WORKSPACE_DIR.rglob("*.java") if "src/test/java" in f.as_posix()]
     print(f"\nTotal files generated after Turn 2 ({len(all_files)} found):")
     for f in all_files:
         print(f"  - {f.relative_to(WORKSPACE_DIR)}")

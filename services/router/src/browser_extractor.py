@@ -156,6 +156,131 @@ def resolve_java_path(declared_path: str, content: str) -> str:
     return f"{root_dir}/{pkg_dir}/{filename}"
 
 
+GENERIC_TOP_DIRS = {
+    "src", "test", "tests", "lib", "app", "config", "configs", "public",
+    "static", "assets", "dist", "build", "target", "out", "bin", "scripts",
+    "docs", "doc", "examples", "resources", "cmd", "internal", "pkg", ".github",
+}
+
+PROMPT_STOPWORDS = {
+    "create", "build", "write", "make", "generate", "implement", "develop",
+    "please", "you", "must", "following", "files", "file", "separate", "project",
+    "application", "app", "service", "the", "and", "for", "with", "using",
+    "under", "base", "package", "that", "from", "into", "new", "simple", "modular",
+}
+
+
+def sanitize_project_name(candidate: str) -> Optional[str]:
+    """Normalizes a candidate project folder name into a safe kebab-case directory slug."""
+    if not candidate:
+        return None
+    cleaned = candidate.strip().strip("`'\"/*# ")
+    if cleaned.lower().startswith("workspace/"):
+        cleaned = cleaned.split("/", 1)[1]
+    cleaned = cleaned.split("/")[0].strip()
+    if cleaned.startswith("@") and "/" in candidate:
+        cleaned = candidate.split("/")[-1].strip()
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", cleaned).strip("-._").lower()
+    if not slug or slug in GENERIC_TOP_DIRS or slug in {"workspace", "project", "default", "none", "null"}:
+        return None
+    if len(slug) > 60:
+        slug = slug[:60].rstrip("-._")
+    return slug or None
+
+
+def resolve_project_name(
+    raw_text: str,
+    files_to_write: List[Dict[str, str]],
+    user_prompt: str = "",
+    explicit_project: Optional[str] = None,
+) -> str:
+    """
+    Determines the project subfolder name under /workspace/<project-name> from:
+    1. Explicit project name in workspace_context (e.g. Turn 2+ of same conversation)
+    2. Explicit folder in user_prompt (e.g. 'workspace/my-app' or 'Project: my-app')
+    3. Gemini's 'Project: <project-name>' header
+    4. Existing non-generic top-level folder shared by all extracted file paths
+    5. Project manifest files (package.json name, pom.xml artifactId, settings.gradle, application.yaml)
+    6. Fallback slug derived from user_prompt
+    """
+    # 1. Explicit project from workspace_context
+    slug = sanitize_project_name(explicit_project or "")
+    if slug:
+        return slug
+
+    # 2. Explicit workspace/<folder> or Project: <folder> in user_prompt
+    if user_prompt:
+        m_ws = re.search(r"(?:workspace[\\/]|(?:\bproject|\bfolder)\s*(?:name)?\s*[:=]\s*`?)([a-zA-Z0-9][a-zA-Z0-9_-]{1,50})", user_prompt, re.IGNORECASE)
+        if m_ws:
+            slug = sanitize_project_name(m_ws.group(1))
+            if slug:
+                return slug
+
+    # 3. Gemini's 'Project: <project-name>' header in raw output
+    if raw_text:
+        m_proj = re.search(
+            r"(?:^|\n)\s*(?:###?\s*|\*\*|#\s*)?Project(?:\s+Name|\s+Folder)?\s*:\s*`?([a-zA-Z0-9][a-zA-Z0-9._\-]{1,60})`?",
+            raw_text,
+            re.IGNORECASE,
+        )
+        if m_proj:
+            slug = sanitize_project_name(m_proj.group(1))
+            if slug:
+                return slug
+
+    # 4. Check if all extracted files already share a non-generic top-level directory
+    top_dirs = set()
+    all_have_top_dir = bool(files_to_write)
+    for f in files_to_write:
+        norm = f.get("path", "").replace("\\", "/").lstrip("/")
+        parts = [p for p in norm.split("/") if p]
+        if len(parts) >= 2 and parts[0].lower() not in GENERIC_TOP_DIRS:
+            top_dirs.add(parts[0])
+        else:
+            all_have_top_dir = False
+            break
+    if all_have_top_dir and len(top_dirs) == 1:
+        slug = sanitize_project_name(next(iter(top_dirs)))
+        if slug:
+            return slug
+
+    # 5. Inspect manifest files (package.json, pom.xml, application.yaml)
+    for f in files_to_write:
+        bname = os.path.basename(f.get("path", "")).lower()
+        content = f.get("content", "")
+        if bname == "package.json":
+            try:
+                pkg = json.loads(content)
+                slug = sanitize_project_name(str(pkg.get("name", "")))
+                if slug:
+                    return slug
+            except Exception:
+                pass
+        elif bname == "pom.xml":
+            m_art = re.search(r"<artifactId>\s*([a-zA-Z0-9._\-]+)\s*</artifactId>", content)
+            if m_art:
+                slug = sanitize_project_name(m_art.group(1))
+                if slug and "spring-boot" not in slug:
+                    return slug
+        elif bname in ("application.yaml", "application.yml"):
+            m_app = re.search(r"name\s*:\s*['\"]?([a-zA-Z0-9._\-]+)['\"]?", content)
+            if m_app:
+                slug = sanitize_project_name(m_app.group(1))
+                if slug:
+                    return slug
+
+    # 6. Derive slug from user_prompt keywords
+    if user_prompt:
+        words = re.findall(r"[a-zA-Z][a-zA-Z0-9]{2,}", user_prompt.lower())
+        keywords = [w for w in words if w not in PROMPT_STOPWORDS][:3]
+        if keywords:
+            slug = sanitize_project_name("-".join(keywords))
+            if slug:
+                return slug
+
+    return "zerogravity-project"
+
+
 def check_syntax_sanity(filepath: str, content: str) -> tuple[bool, str]:
     """Validates syntax sanity for Python, JSON, YAML, XML (pom.xml), Java, and JS/TS."""
     if not content or not content.strip():
@@ -207,25 +332,31 @@ def extract_filename_from_context(preceding_text: str, first_line_of_code: str, 
     # 2. Check preceding markdown context (within ~200 chars before code block)
     if preceding_text:
         # Check bold: **main.py** or `main.py` or ### main.py or File: main.py
-        patterns = [
-            r'\*\*(?:(?:File|file):\s*)?' + filename_pattern + r'\*\*',
-            r'`' + filename_pattern + r'`',
-            r'(?:(?:File|file|filename|Path|path):\s*)`?' + filename_pattern + r'`?',
-            r'###?\s+`?' + filename_pattern + r'`?',
-        ]
+        if lang in ("bash", "sh", "shell", "zsh", "console"):
+            patterns = [
+                r'(?:(?:File|file|filename|Path|path):\s*)`?' + filename_pattern + r'`?',
+            ]
+        else:
+            patterns = [
+                r'\*\*(?:(?:File|file):\s*)?' + filename_pattern + r'\*\*',
+                r'`' + filename_pattern + r'`',
+                r'(?:(?:File|file|filename|Path|path):\s*)`?' + filename_pattern + r'`?',
+                r'###?\s+`?' + filename_pattern + r'`?',
+            ]
         for pat in patterns:
             matches = re.findall(pat, preceding_text, re.IGNORECASE)
             if matches:
                 return matches[-1]
 
+    # Unlabelled shell blocks are command blocks, not source files from user_prompt
+    if lang in ("bash", "sh", "shell", "zsh", "console"):
+        return None
+
     # 3. Check user prompt for target filename (e.g. "Create a file main.py")
     if user_prompt:
         matches = re.findall(filename_pattern, user_prompt, re.IGNORECASE)
-        if matches:
-            # If multiple code blocks and prompt mentioned multiple, match by index if possible
-            if index < len(matches):
-                return matches[index]
-            return matches[0]
+        if matches and index < len(matches):
+            return matches[index]
 
     return None
 
@@ -350,8 +481,8 @@ def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
                 stripped = line.strip()
                 if stripped and not stripped.startswith("#") and not stripped.startswith("//"):
                     commands.append(stripped)
-            # If it's an explicit script file, also write the file
-            if filename and filename != "run.sh":
+            # If it's an explicit shell script file, also write the file
+            if filename and filename != "run.sh" and filename.endswith((".sh", ".bash")):
                 files.append({"path": filename, "content": clean_content})
         else:
             files.append({"path": filename, "content": clean_content})
@@ -519,6 +650,27 @@ def extract_and_validate_code(
 
         processed_files.append({"path": path, "content": clean_code})
 
+    # 2b. Automatic project subfolder scoping under /workspace/<project-name> when enabled
+    ctx = workspace_context or {}
+    auto_project_dir = bool(ctx.get("auto_project_dir", False) or ctx.get("project_name"))
+    project_name: Optional[str] = None
+    if auto_project_dir and processed_files:
+        project_name = resolve_project_name(
+            cleaned_input,
+            processed_files,
+            user_prompt=user_prompt,
+            explicit_project=ctx.get("project_name"),
+        )
+        if project_name:
+            for file_entry in processed_files:
+                norm_p = file_entry["path"].replace("\\", "/").lstrip("/")
+                if norm_p.startswith("workspace/"):
+                    norm_p = norm_p[len("workspace/"):]
+                if not norm_p.startswith(f"{project_name}/"):
+                    file_entry["path"] = f"{project_name}/{norm_p}"
+                else:
+                    file_entry["path"] = norm_p
+
     # 3. Path Safety & Bounds Validation
     safe_files = []
     validation_notes = []
@@ -548,6 +700,7 @@ def extract_and_validate_code(
 
     return {
         "explanation": explanation,
+        "project_name": project_name,
         "files_to_write": safe_files if is_valid else [],
         "commands_to_run": commands if cmd_ok else [],
         "valid": is_valid,

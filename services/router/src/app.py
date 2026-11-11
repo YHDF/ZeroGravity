@@ -1,12 +1,13 @@
 import os
+import re
 import logging
 from typing import Dict, Any, Optional, List
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from browser_extractor import extract_and_validate_code, LOCAL_AI_ENABLED
-from mcp_workspace import write_to_file, run_command
+from browser_extractor import extract_and_validate_code, sanitize_project_name, LOCAL_AI_ENABLED
+from mcp_workspace import write_to_file, run_command, clean_workspace, get_workspace_root
 from history_manager import create_turn_record, update_history_index
 
 logger = logging.getLogger("quota_router")
@@ -14,11 +15,35 @@ logging.basicConfig(level=logging.INFO)
 
 ZEROGRAVITY_BROWSER_URL = os.environ.get("ZEROGRAVITY_BROWSER_URL", "http://gemini-bridge:5000")
 ZEROGRAVITY_EXECUTION_MODE = os.environ.get("ZEROGRAVITY_EXECUTION_MODE", "direct") # 'direct' or 'agy'
+ZEROGRAVITY_CLEAN_ON_NEW_CHAT = os.environ.get("ZEROGRAVITY_CLEAN_ON_NEW_CHAT", "false").lower() == "true"
 # Seconds the bridge may wait for Gemini to finish; the router waits longer to cover queueing (bridge serializes prompts)
 GEMINI_RESPONSE_TIMEOUT = int(os.environ.get("GEMINI_RESPONSE_TIMEOUT", "240"))
 BRIDGE_HTTP_TIMEOUT = float(os.environ.get("BRIDGE_HTTP_TIMEOUT", str(GEMINI_RESPONSE_TIMEOUT * 2 + 60)))
 
+# Tracks the most recently active project folder across multi-turn requests
+_LAST_ACTIVE_PROJECT: Optional[str] = None
+
 app = FastAPI(title="ZeroGravity Router API")
+
+
+def needs_auto_project_dir() -> bool:
+    """
+    Returns True when WORKSPACE_PATH is the root 'workspace' directory (not already
+    scoped to 'workspace/{project-name}'), so each new conversation gets its own
+    project folder under /workspace/<project-name>.
+    """
+    explicit_env = os.environ.get("ZEROGRAVITY_AUTO_PROJECT_DIR")
+    if explicit_env is not None and explicit_env.strip() != "":
+        return explicit_env.strip().lower() in ("1", "true", "yes", "on")
+
+    host_ws = os.environ.get("HOST_WORKSPACE_PATH", "").strip()
+    if host_ws:
+        norm = host_ws.replace("\\", "/").rstrip("/")
+        basename = norm.split("/")[-1].lower() if norm else ""
+        return basename == "workspace"
+
+    ws_root = os.environ.get("WORKSPACE_ROOT", "/workspace").replace("\\", "/").rstrip("/")
+    return ws_root == "/workspace"
 
 
 class GenerationRequest(BaseModel):
@@ -33,6 +58,7 @@ class GenerationResponse(BaseModel):
     status: str
     explanation: str
     execution_mode: str
+    project_name: Optional[str] = None
     files_written: List[Dict[str, Any]] = []
     commands_executed: List[Dict[str, Any]] = []
     raw_browser_output: Optional[str] = None
@@ -60,8 +86,13 @@ async def execute_direct_patch(extracted_data: Dict[str, Any]) -> tuple[List[Dic
             res = write_to_file(path, content)
             files_written.append(res)
 
+    cmd_root = get_workspace_root()
+    project_name = extracted_data.get("project_name")
+    if project_name:
+        cmd_root = os.path.join(cmd_root, project_name)
+
     for cmd in extracted_data.get("commands_to_run", []):
-        res = run_command(cmd)
+        res = run_command(cmd, workspace_root=cmd_root)
         commands_executed.append(res)
 
     return files_written, commands_executed
@@ -93,11 +124,13 @@ async def execute_agy_ingestion(extracted_data: Dict[str, Any]) -> tuple[List[Di
 async def healthz():
     # Check connection to browser bridge
     browser_healthy = False
+    browser_signed_in = None
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(f"{ZEROGRAVITY_BROWSER_URL.rstrip('/')}/healthz", timeout=5.0)
             if res.status_code == 200:
                 browser_healthy = True
+                browser_signed_in = res.json().get("signed_in")
     except Exception:
         pass
 
@@ -105,6 +138,8 @@ async def healthz():
         "status": "ok",
         "browser_bridge_url": ZEROGRAVITY_BROWSER_URL,
         "browser_bridge_connected": browser_healthy,
+        "browser_signed_in": browser_signed_in,
+        "auto_project_dir": needs_auto_project_dir(),
         "default_execution_mode": ZEROGRAVITY_EXECUTION_MODE,
         "local_ai_enabled": LOCAL_AI_ENABLED,
     }
@@ -113,10 +148,17 @@ async def healthz():
 @app.post("/generate", response_model=GenerationResponse)
 @app.post("/route", response_model=GenerationResponse)
 async def route_generation(req: GenerationRequest):
+    global _LAST_ACTIVE_PROJECT
     if not req.prompt:
         raise HTTPException(status_code=400, detail="Prompt is required.")
 
     exec_mode = req.execution_mode or ZEROGRAVITY_EXECUTION_MODE
+    ws_ctx = dict(req.workspace_context or {})
+    auto_proj = bool(ws_ctx.get("auto_project_dir", needs_auto_project_dir()) or ws_ctx.get("project_name"))
+    if auto_proj:
+        ws_ctx["auto_project_dir"] = True
+        if not req.new_chat and not ws_ctx.get("project_name") and _LAST_ACTIVE_PROJECT:
+            ws_ctx["project_name"] = _LAST_ACTIVE_PROJECT
 
     # Step 1: Forward prompt to Headless Gemini Browser Bridge with Lead Architect conditioning
     consumer_desc = (
@@ -124,10 +166,25 @@ async def route_generation(req: GenerationRequest):
         if LOCAL_AI_ENABLED
         else "an automated parser that writes each code block directly to disk"
     )
+    if auto_proj:
+        if ws_ctx.get("project_name"):
+            project_instruction = (
+                f'0. Active project folder inside workspace: "Project: {ws_ctx["project_name"]}". '
+                'Declare "Project: ' + ws_ctx["project_name"] + '" on the first line and keep all "File: <path>" headers relative to this project root.\n'
+            )
+        else:
+            project_instruction = (
+                '0. Because WORKSPACE_PATH is not scoped to a project subfolder, you MUST choose a concise kebab-case project folder name '
+                'and declare it on the very first line of your response in the exact format: "Project: <project-name>" '
+                '(e.g. "Project: ts-priority-queue" or "Project: task-manager-api"). Keep all "File: <path>" headers relative to that project root.\n'
+            )
+    else:
+        project_instruction = ""
+
     formatted_prompt = f"""System: You are the Lead Systems Architect in an autonomous code generation pipeline.
 Your output, specifications, and code snippets are directly consumed and executed chunk-by-chunk by {consumer_desc}.
 Therefore, format your instructions and code blocks clearly for the automated executor:
-1. For every file, clearly declare the relative path on the line immediately preceding the code block (e.g. "File: pom.xml" or "File: src/main/java/com/example/demo/UserController.java" or "File: package.json" or "File: src/index.ts").
+{project_instruction}1. For every file, clearly declare the relative path on the line immediately preceding the code block (e.g. "File: pom.xml" or "File: src/main/java/com/example/demo/UserController.java" or "File: package.json" or "File: src/index.ts").
 2. Adhere to standard project directory conventions:
    - Java / Spring Boot: pom.xml or build.gradle, src/main/java/<package_path>/<ClassName>.java, src/main/resources/application.yaml, src/test/java/<package_path>/<TestClass>.java
    - TypeScript / JavaScript: package.json, tsconfig.json, src/...
@@ -174,11 +231,14 @@ User Request: {req.prompt}"""
     # Step 3: Extract code blocks (optional Ollama synthesis if ZEROGRAVITY_LOCAL_AI=true) & validate
     extracted_data = extract_and_validate_code(
         raw_output,
-        workspace_context=req.workspace_context,
+        workspace_context=ws_ctx,
         user_prompt=req.prompt,
         turn_record=turn_record,
     )
-    logger.info(f"Raw output len: {len(raw_output)}. Extracted files count: {len(extracted_data.get('files_to_write', []))}, Extracted data: {extracted_data}")
+    resolved_project = extracted_data.get("project_name")
+    if resolved_project:
+        _LAST_ACTIVE_PROJECT = resolved_project
+    logger.info(f"Raw output len: {len(raw_output)}. Project: {resolved_project}. Extracted files count: {len(extracted_data.get('files_to_write', []))}")
 
     if not extracted_data.get("valid", False):
         turn_record.finalize([], [])
@@ -187,11 +247,16 @@ User Request: {req.prompt}"""
             status="validation_failed",
             explanation=extracted_data.get("explanation", "Validation failed."),
             execution_mode=exec_mode,
+            project_name=resolved_project,
             raw_browser_output=raw_output,
             validation_notes=extracted_data.get("validation_notes"),
         )
 
-    # Step 4: Execute changes based on selected strategy
+    # Step 4: Clean previous project files only when ZEROGRAVITY_CLEAN_ON_NEW_CHAT=true and not using per-project subfolders
+    if req.new_chat and ZEROGRAVITY_CLEAN_ON_NEW_CHAT and not auto_proj and extracted_data.get("files_to_write"):
+        clean_workspace()
+
+    # Step 5: Execute changes based on selected strategy
     if exec_mode.lower() == "agy":
         files_written, commands_executed = await execute_agy_ingestion(extracted_data)
     else:
@@ -205,6 +270,7 @@ User Request: {req.prompt}"""
         status="success",
         explanation=extracted_data.get("explanation", "Generation and execution completed."),
         execution_mode=exec_mode,
+        project_name=resolved_project,
         files_written=files_written,
         commands_executed=commands_executed,
         raw_browser_output=raw_output,
@@ -246,6 +312,23 @@ def is_openwebui_internal_task(prompt: str) -> bool:
         '"title":',
     ]
     return any(marker in prompt for marker in markers)
+
+
+def extract_project_from_history(assistant_msgs: List[Dict[str, Any]]) -> Optional[str]:
+    """Extracts the active project subfolder from previous assistant replies in the same conversation."""
+    for msg in reversed(assistant_msgs):
+        text = msg.get("content", "") or ""
+        m_folder = re.search(r"ZeroGravity Project Folder:\*\*\s*`/workspace/([a-zA-Z0-9._\-]+)`", text)
+        if m_folder:
+            slug = sanitize_project_name(m_folder.group(1))
+            if slug:
+                return slug
+        m_file = re.search(r"- `/workspace/([a-zA-Z0-9._\-]+)/", text)
+        if m_file:
+            slug = sanitize_project_name(m_file.group(1))
+            if slug:
+                return slug
+    return None
 
 
 @app.post("/v1/chat/completions")
@@ -295,14 +378,35 @@ async def chat_completions(payload: Dict[str, Any]):
     assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
     is_new_chat = len(assistant_msgs) == 0
 
-    gen_req = GenerationRequest(prompt=user_prompt, model=model, new_chat=is_new_chat)
+    ws_ctx: Dict[str, Any] = {}
+    if not is_new_chat:
+        hist_proj = extract_project_from_history(assistant_msgs)
+        if hist_proj:
+            ws_ctx["project_name"] = hist_proj
+
+    gen_req = GenerationRequest(
+        prompt=user_prompt,
+        model=model,
+        new_chat=is_new_chat,
+        workspace_context=ws_ctx if ws_ctx else None,
+    )
     res = await route_generation(gen_req)
 
     reply_content = res.raw_browser_output or res.explanation
     if res.files_written:
         written_files = [f.get("path") for f in res.files_written if f.get("status") == "success"]
         if written_files:
-            reply_content += "\n\n---\n📁 **ZeroGravity Workspace Files Created:**\n" + "\n".join([f"- `{p}`" for p in written_files])
+            project_line = (
+                f"📂 **ZeroGravity Project Folder:** `/workspace/{res.project_name}`\n"
+                if res.project_name
+                else ""
+            )
+            reply_content += (
+                "\n\n---\n"
+                + project_line
+                + "📁 **ZeroGravity Workspace Files Created:**\n"
+                + "\n".join([f"- `{p}`" for p in written_files])
+            )
     elif res.status == "validation_failed":
         reply_content += f"\n\n---\n⚠️ **ZeroGravity Validation Warning**: {res.validation_notes}"
 

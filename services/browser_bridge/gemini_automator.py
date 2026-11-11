@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import asyncio
 import logging
@@ -92,7 +93,60 @@ class GeminiAutomator:
         self.playwright: Optional[Playwright] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
+        self._signin_watcher_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
+
+    def _storage_state_path(self) -> str:
+        return os.path.join(self.profile_dir, "storage_state.json")
+
+    async def _save_storage_state(self) -> bool:
+        """Exports decrypted cookies & localStorage via CDP to storage_state.json for reliable headless reuse."""
+        if not self.context:
+            return False
+        try:
+            state_path = self._storage_state_path()
+            await self.context.storage_state(path=state_path)
+            return True
+        except Exception as e:
+            logger.debug(f"Could not save storage_state.json: {e}")
+            return False
+
+    async def _restore_storage_state(self) -> int:
+        """Restores cookies from storage_state.json into the browser context via CDP."""
+        if not self.context:
+            return 0
+        state_path = self._storage_state_path()
+        if not os.path.isfile(state_path):
+            return 0
+        try:
+            with open(state_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            cookies = data.get("cookies", [])
+            if cookies:
+                await self.context.add_cookies(cookies)
+                logger.info(f"Restored {len(cookies)} cookies from {state_path}")
+                return len(cookies)
+        except Exception as e:
+            logger.warning(f"Failed restoring cookies from {state_path}: {e}")
+        return 0
+
+    async def _watch_headed_signin(self):
+        """Background watcher in headed mode: saves storage_state.json as soon as Google sign-in completes."""
+        logged_once = False
+        while self.context and not self.headless:
+            try:
+                if await self.is_signed_in():
+                    if await self._save_storage_state() and not logged_once:
+                        logger.info(
+                            f"[Google Sign-In Detected] Session cookies saved to {self._storage_state_path()}. "
+                            "You can now press Ctrl+C and run in headless mode!"
+                        )
+                        logged_once = True
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+            await asyncio.sleep(3.0)
 
     async def start(self):
         async with self._lock:
@@ -109,15 +163,24 @@ class GeminiAutomator:
             f"channel: {self.channel}"
         )
         os.makedirs(self.profile_dir, exist_ok=True)
+        for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            lock_path = os.path.join(self.profile_dir, lock_name)
+            if os.path.lexists(lock_path):
+                try:
+                    os.unlink(lock_path)
+                except OSError:
+                    pass
         self.playwright = await async_playwright().start()
 
         launch_kwargs = {
             "user_data_dir": self.profile_dir,
             "headless": self.headless,
+            "ignore_default_args": ["--enable-automation"],
             "args": [
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
+                "--password-store=basic",
             ],
             "viewport": {"width": 1280, "height": 800},
         }
@@ -127,6 +190,7 @@ class GeminiAutomator:
             launch_kwargs["channel"] = self.channel
 
         self.context = await self.playwright.chromium.launch_persistent_context(**launch_kwargs)
+        await self._restore_storage_state()
         if self.context.pages:
             self.page = self.context.pages[0]
         else:
@@ -136,13 +200,27 @@ class GeminiAutomator:
             logger.info(f"Navigating browser to {GEMINI_URL}...")
             await self.page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(1.5)
-            await self._dismiss_overlays()
+            if self.headless:
+                await self._dismiss_overlays()
+            signed_in = await self.is_signed_in()
+            logger.info(f"Gemini Web loaded (signed_in={signed_in}, url={self.page.url})")
         except Exception as e:
             logger.warning(f"Initial navigation warning: {e}")
 
+        if not self.headless:
+            self._signin_watcher_task = asyncio.create_task(self._watch_headed_signin())
+
     async def stop(self):
         async with self._lock:
+            if self._signin_watcher_task:
+                self._signin_watcher_task.cancel()
+                self._signin_watcher_task = None
             if self.context:
+                try:
+                    if await self.is_signed_in():
+                        await self._save_storage_state()
+                except Exception:
+                    pass
                 await self.context.close()
                 self.context = None
             if self.playwright:
@@ -562,4 +640,6 @@ class GeminiAutomator:
                         f"(responses seen: {await self._response_count()}, url: {self.page.url}).{hint}{where}"
                     )
 
+            if await self.is_signed_in():
+                await self._save_storage_state()
             return raw_output.strip()

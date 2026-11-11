@@ -116,28 +116,51 @@ Services started:
 
 The `ollama` service is **not** started by default (it lives in the `local-ai` compose profile).
 
-### 4. Authenticate Gemini Web (One-time)
-If your profile directory (`~/.zerogravity-profile`) is not yet authenticated:
-1. Temporarily set `ZEROGRAVITY_HEADLESS=false` in `.env`.
-2. Restart the bridge: `docker compose up -d gemini-bridge`.
-3. Complete the Google Sign-In manually in the launched browser window.
-4. Set `ZEROGRAVITY_HEADLESS=true` and restart.
+### 4. Authenticate Gemini Web with Your Google Account (One-time, Dockerized)
+No local Python or Playwright installation is needed on your host machine. Both `run_local.ps1` (PowerShell) and `run_local.sh` (Bash) run the bridge inside Docker and expose an interactive **noVNC web viewer** on `http://localhost:6080` when `-Headed` / `--headed` is passed:
 
-> [!TIP]
-> A headed browser inside a Linux container has no visible window on Windows/macOS. It is usually easier to sign in once with the **native bridge** below using `-Headed`; the same `~/.zerogravity-profile` folder is then reused by the Docker bridge.
+**PowerShell (Windows):**
+```powershell
+# 1. Launch headed login container (opens http://localhost:6080/vnc.html?autoconnect=true&resize=scale)
+.\services\browser_bridge\run_local.ps1 -Headed
+
+# Or use a dedicated profile folder for a specific Google account:
+.\services\browser_bridge\run_local.ps1 -ProfileDir "$HOME\.zg-work" -Headed
+```
+
+**Bash (Linux / macOS / Git Bash / WSL):**
+```bash
+# 1. Launch headed login container (opens http://localhost:6080/vnc.html?autoconnect=true&resize=scale)
+./services/browser_bridge/run_local.sh --headed
+
+# Or use a dedicated profile folder for a specific Google account:
+./services/browser_bridge/run_local.sh --profile-dir "$HOME/.zg-work" --headed
+```
+
+1. In the browser tab that opens (`http://localhost:6080/vnc.html?autoconnect=true&resize=scale`), click **Sign in** inside the container's Chromium window and log in to your Google account.
+2. Once signed in and the Gemini prompt box is visible, press **`Ctrl+C`** in your terminal.
+3. Now run in **headless mode** (without `-Headed` / `--headed`, or via `docker compose up -d`) — the container reuses the exact same Linux Chromium profile (`--password-store=basic`) and stays logged into your Google account:
+   ```powershell
+   # PowerShell (headless):
+   .\services\browser_bridge\run_local.ps1 -ProfileDir "$HOME\.zg-work"
+   ```
+   ```bash
+   # Bash (headless):
+   ./services/browser_bridge/run_local.sh --profile-dir "$HOME/.zg-work"
+   ```
 
 ---
 
-## 🦁 Using Your Own Browser (Brave / Chrome / Edge) — Native Bridge
+## 🦁 Optional: Native Host Browser Mode (`-Native` / `--native`)
 
-The Docker bridge only ships Playwright's bundled Chromium, so `BROWSER_EXECUTABLE_PATH` and `BROWSER_CHANNEL` are **ignored in Docker**. To drive a browser installed on your machine, run the bridge natively on Windows and keep the rest of the stack in Docker:
+If you have Python installed on the host and specifically want to drive a host-installed browser binary (Brave / Chrome / Edge) outside Docker, pass `-Native` / `--native` or `-BrowserExecutable` / `-Channel`:
 
 ```powershell
-# 1. Start the bridge on the host (creates services/browser_bridge/.venv on first run)
+# 1. Start the bridge natively on the host (requires local Python 3.11+)
 cd services\browser_bridge
-.\run_local.ps1 -BrowserExecutable "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" -Headed
-#   or: .\run_local.ps1 -Channel chrome      (installed Chrome)
-#   or: .\run_local.ps1 -Channel msedge      (installed Edge)
+.\run_local.ps1 -Native -BrowserExecutable "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" -Headed
+#   or: .\run_local.ps1 -Native -Channel chrome
+#   or: .\run_local.ps1 -Native -Channel msedge
 ```
 
 ```env
@@ -206,7 +229,8 @@ docker exec ollama ollama pull qwen2.5-coder:1.5b
 │   ├── browser_bridge/             # Headless Gemini Web automation
 │   │   ├── gemini_automator.py     # Playwright automation & shadow DOM locators
 │   │   ├── server.py               # FastAPI bridge server
-│   │   ├── run_local.ps1           # Native Windows launcher (Brave / Chrome / Edge)
+│   │   ├── entrypoint.sh           # Container entrypoint (starts Xvfb + noVNC when headed)
+│   │   ├── run_local.ps1 / .sh     # Docker-first bridge launcher (PowerShell & Bash)
 │   │   ├── tests/test_server.py    # Bridge API tests (Playwright mocked)
 │   │   └── Dockerfile
 │   └── router/                     # Router & extraction engine
@@ -220,9 +244,11 @@ docker exec ollama ollama pull qwen2.5-coder:1.5b
 │       │   └── test_browser_extractor.py
 │       └── Dockerfile
 ├── tests/
-│   └── test-runs/                  # End-to-end multi-turn verification suites
-│       ├── test_multi_turn_fibonacci.ps1 / .py
-│       ├── test_multi_turn_springboot.ps1 / .py
+│   └── test-runs/                  # End-to-end multi-turn verification suites by technology
+│       ├── javascript/             # Node.js / JS Fibonacci (test_multi_turn_fibonacci.{ps1,sh,py})
+│       ├── typescript/             # TypeScript PriorityQueue (test_multi_turn_typescript.{ps1,sh,py})
+│       ├── python/                 # Python LRUCache (test_multi_turn_python.{ps1,sh,py})
+│       ├── springboot/             # Java 17 Spring Boot 3 (test_multi_turn_springboot.{ps1,sh,py})
 │       └── mock_bridge/            # CI stand-in for Gemini Web (replays recorded responses)
 ├── docker-compose.ci.yml           # CI overlay: swaps the real bridge for mock_bridge
 ├── pyproject.toml                  # Ruff / Bandit / pytest configuration
@@ -260,7 +286,7 @@ bandit -c pyproject.toml -r services tests/test-runs -ll
 # E2E with the mock bridge
 mkdir -p ci-workspace && export WORKSPACE_PATH=$PWD/ci-workspace WORKSPACE_DIR=$PWD/ci-workspace
 docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build quota-router mock-bridge
-python tests/test-runs/test_multi_turn_springboot.py
+python tests/test-runs/springboot/test_multi_turn_springboot.py
 ```
 
 > [!NOTE]

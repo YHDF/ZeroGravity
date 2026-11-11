@@ -15,7 +15,7 @@ import urllib.error
 from pathlib import Path
 
 ROUTER_URL = os.environ.get("ROUTER_URL", "http://localhost:8000")
-repo_ws = Path(__file__).resolve().parent.parent.parent / "workspace"
+repo_ws = Path(__file__).resolve().parents[3] / "workspace"
 default_ws = repo_ws if repo_ws.exists() else Path(__file__).parent / "workspace"
 WORKSPACE_DIR = Path(os.environ.get("WORKSPACE_DIR", default_ws))
 

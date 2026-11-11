@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import logging
 from typing import Dict, Any
@@ -7,10 +8,30 @@ logger = logging.getLogger("mcp_workspace")
 logging.basicConfig(level=logging.INFO)
 
 WORKSPACE_ROOT = os.environ.get("WORKSPACE_ROOT", "/workspace")
+PRESERVED_ENTRIES = {".gemini-history", ".gitkeep"}
 
 
 def get_workspace_root() -> str:
     return os.path.abspath(WORKSPACE_ROOT)
+
+
+def clean_workspace(workspace_root: str = WORKSPACE_ROOT) -> None:
+    """Removes prior project files from workspace_root while preserving .gemini-history and .gitkeep."""
+    norm_workspace = os.path.abspath(workspace_root)
+    if not os.path.isdir(norm_workspace):
+        return
+    for entry in os.listdir(norm_workspace):
+        if entry in PRESERVED_ENTRIES:
+            continue
+        target = os.path.join(norm_workspace, entry)
+        try:
+            if os.path.isdir(target) and not os.path.islink(target):
+                shutil.rmtree(target)
+            else:
+                os.unlink(target)
+        except Exception as e:
+            logger.warning(f"Failed removing stale workspace entry '{target}': {e}")
+    logger.info(f"Cleaned workspace '{norm_workspace}' for new chat session.")
 
 
 def write_to_file(path: str, content: str, workspace_root: str = WORKSPACE_ROOT) -> Dict[str, Any]:
