@@ -67,10 +67,9 @@ if (-not $Native -and -not $BrowserExecutable -and -not $Channel) {
         Write-Host "  -> Sign in to your Google account in the browser window that opens," -ForegroundColor Yellow
         Write-Host "     then press Ctrl+C here when finished to save the session." -ForegroundColor Yellow
         Start-Job -ScriptBlock {
-            param($u)
             Start-Sleep -Seconds 3
-            Start-Process $u
-        } -ArgumentList $vncUrl | Out-Null
+            Start-Process $using:vncUrl
+        } | Out-Null
     }
     Write-Host "======================================================================" -ForegroundColor Cyan
 

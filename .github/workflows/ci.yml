@@ -45,8 +45,10 @@ jobs:
       - name: PSScriptAnalyzer (PowerShell lint)
         shell: pwsh
         run: |
-          Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+            Set-PSRepository PSGallery -InstallationPolicy Trusted
+            Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          }
           $results = Get-ChildItem -Recurse -Filter *.ps1 -Path services, tests |
             Invoke-ScriptAnalyzer -Severity Error, Warning -ExcludeRule PSAvoidUsingWriteHost
           $results | Format-Table RuleName, Severity, ScriptName, Line, Message -AutoSize -Wrap
