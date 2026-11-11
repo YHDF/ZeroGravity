@@ -50,6 +50,16 @@ class TestBridgeServer(unittest.TestCase):
         self.assertIn("print('hi')", res.json()["raw_output"])
         send.assert_awaited_once_with("hello", timeout=30, new_chat=True)
 
+    def test_generate_forwards_manual_submit_override(self):
+        send = AsyncMock(return_value="PONG")
+        with patch.object(server.automator, "send_prompt", send):
+            res = self.client.post(
+                "/generate",
+                json={"prompt": "ping", "new_chat": False, "timeout": 60, "manual_submit": True},
+            )
+        self.assertEqual(res.status_code, 200)
+        send.assert_awaited_once_with("ping", timeout=60, new_chat=False, manual_submit=True)
+
     def test_generate_timeout_maps_to_504(self):
         with patch.object(server.automator, "send_prompt", AsyncMock(side_effect=TimeoutError("too slow"))):
             res = self.client.post("/generate", json={"prompt": "hello"})

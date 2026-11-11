@@ -459,6 +459,98 @@ console.timeEnd('Memoized');
         self.assertIn("src/memoizedFibonacci.js", paths2)
         self.assertIn("src/benchmark.js", paths2)
 
+    def test_fence_comma_and_nested_readme_fences_do_not_invert_blocks(self):
+        raw_response = """Project: cil-legal-phone-purge
+
+```bash
+# Setup environment and dependencies
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+File: requirements.txt
+
+```plaintext
+pymongo>=4.6.0
+requests>=2.31.0
+```
+
+File: .env.example
+
+```ini,
+MONGO_URI=mongodb://localhost:27017
+TARGET_PHONE=+33612345678
+```
+
+File: src/init.py
+
+```python
+\"\"\"
+CIL Legal Data Purge (RDD) - Phone Number Erasure Package.
+\"\"\"
+```
+
+File: src/config.py
+
+```python
+import os
+class AppSettings:
+    pass
+```
+
+File: src/reachfive_service.py
+
+```python
+import requests
+class ReachFiveService:
+    pass
+```
+
+File: README.md
+
+```markdown
+# CIL Legal Data Purge (RDD)
+
+## 1. Installation
+
+```bash
+python3 -m venv venv
+pip install -r requirements.txt
+```
+
+2. Execution
+
+```bash
+python -m src.purge_orchestrator --phone "+33612345678" --dry-run
+```
+```
+```bash
+# Verify file tree structure
+ls -la src/
+```
+"""
+        res = extract_and_validate_code(raw_response, workspace_context={"auto_project_dir": True})
+        self.assertTrue(res.get("valid"), res.get("validation_notes"))
+        files = {f["path"]: f["content"] for f in res.get("files_to_write", [])}
+
+        self.assertIn("cil-legal-phone-purge/requirements.txt", files)
+        self.assertIn("cil-legal-phone-purge/.env.example", files)
+        self.assertIn("cil-legal-phone-purge/src/__init__.py", files)
+        self.assertIn("cil-legal-phone-purge/src/config.py", files)
+        self.assertIn("cil-legal-phone-purge/src/reachfive_service.py", files)
+        self.assertIn("cil-legal-phone-purge/README.md", files)
+        self.assertNotIn("cil-legal-phone-purge/module_9.py", files)
+        self.assertNotIn("cil-legal-phone-purge/module_10.py", files)
+
+        self.assertIn("MONGO_URI=mongodb://localhost:27017", files["cil-legal-phone-purge/.env.example"])
+        self.assertIn("CIL Legal Data Purge", files["cil-legal-phone-purge/src/__init__.py"])
+        self.assertIn("class AppSettings:", files["cil-legal-phone-purge/src/config.py"])
+        self.assertIn("class ReachFiveService:", files["cil-legal-phone-purge/src/reachfive_service.py"])
+        self.assertIn("## 1. Installation", files["cil-legal-phone-purge/README.md"])
+        self.assertIn("ls -la src/", res.get("commands_to_run", []))
+
 
 if __name__ == "__main__":
     unittest.main()

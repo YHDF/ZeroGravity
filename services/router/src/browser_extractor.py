@@ -319,17 +319,32 @@ def check_syntax_sanity(filepath: str, content: str) -> tuple[bool, str]:
 
 
 
+def normalize_declared_filepath(raw_path: str) -> str:
+    """
+    Normalizes a declared file path from Gemini output.
+    Restores Python `__init__.py` when Markdown bold formatting stripped
+    double underscores from `File: src/__init__.py` -> `File: src/init.py`.
+    """
+    cleaned = raw_path.strip().strip("`'\"*").replace("\\", "/")
+    cleaned = re.sub(r"/init\.py$", "/__init__.py", cleaned)
+    return cleaned
+
+
 def extract_filename_from_context(preceding_text: str, first_line_of_code: str, lang: str, index: int, user_prompt: str = "") -> Optional[str]:
     """Detects filename from preceding text, first line of code, or prompt."""
-    filename_pattern = r'([a-zA-Z0-9_\-./]+\.(?:json|jsx|js|tsx|ts|yaml|yml|html|css|py|sh|bash|md|txt|toml|sql|java|xml|gradle|properties|env|dockerfile|Dockerfile)(?![a-zA-Z0-9_]))'
+    filename_pattern = (
+        r'((?:\.?[a-zA-Z0-9_\-]+/)*'
+        r'(?:\.[a-zA-Z0-9_\-.]+|[a-zA-Z0-9_\-.]+\.(?:json|jsx|js|tsx|ts|yaml|yml|html|css|py|sh|bash|md|markdown|txt|toml|ini|cfg|conf|sql|java|xml|gradle|properties|env|example|local|dockerfile|Dockerfile|gitignore|dockerignore))'
+        r'(?![a-zA-Z0-9_]))'
+    )
 
     # 1. Check first line of code block (e.g. # main.py or // src/utils.ts or # filepath: main.py)
     if first_line_of_code:
         m = re.search(r'^(?:#|//|/\*|<!--|;\s*)\s*(?:(?:file|filename|path):\s*)?' + filename_pattern, first_line_of_code.strip(), re.IGNORECASE)
         if m:
-            return m.group(1)
+            return normalize_declared_filepath(m.group(1))
 
-    # 2. Check preceding markdown context (within ~200 chars before code block)
+    # 2. Check preceding markdown context (within ~300 chars before code block)
     if preceding_text:
         # Check bold: **main.py** or `main.py` or ### main.py or File: main.py
         if lang in ("bash", "sh", "shell", "zsh", "console"):
@@ -338,15 +353,15 @@ def extract_filename_from_context(preceding_text: str, first_line_of_code: str, 
             ]
         else:
             patterns = [
+                r'(?:(?:File|file|filename|Path|path):\s*)`?([^\s`\'\"*<>|]+)`?',
                 r'\*\*(?:(?:File|file):\s*)?' + filename_pattern + r'\*\*',
                 r'`' + filename_pattern + r'`',
-                r'(?:(?:File|file|filename|Path|path):\s*)`?' + filename_pattern + r'`?',
                 r'###?\s+`?' + filename_pattern + r'`?',
             ]
         for pat in patterns:
             matches = re.findall(pat, preceding_text, re.IGNORECASE)
             if matches:
-                return matches[-1]
+                return normalize_declared_filepath(matches[-1])
 
     # Unlabelled shell blocks are command blocks, not source files from user_prompt
     if lang in ("bash", "sh", "shell", "zsh", "console"):
@@ -356,7 +371,7 @@ def extract_filename_from_context(preceding_text: str, first_line_of_code: str, 
     if user_prompt:
         matches = re.findall(filename_pattern, user_prompt, re.IGNORECASE)
         if matches and index < len(matches):
-            return matches[index]
+            return normalize_declared_filepath(matches[index])
 
     return None
 
@@ -371,11 +386,11 @@ def clean_code_preamble(content: str) -> str:
         if not stripped:
             continue
         # Skip header metadata lines like [file-tag: ...] or bare language headers
-        if re.match(r'^(?:\[file-tag:|^python$|^javascript$|^typescript$|^java$|^bash$|^html$|^css$|^json$|^yaml$|^xml$)', stripped, re.IGNORECASE):
+        if re.match(r'^(?:\[file-tag:|^python$|^javascript$|^typescript$|^java$|^bash$|^html$|^css$|^json$|^yaml$|^xml$|^plaintext$|^ini$|^markdown$)', stripped, re.IGNORECASE):
             continue
-        # Check if line looks like actual code, markup, or valid comment
+        # Check if line looks like actual code, docstring, config assignment, markup, or valid comment
         if re.match(
-            r'^(?:#|//|/\*|<!--|import\s+|from\s+|export\s+|package\s+|@\w+|def\s+|class\s+|public\s+|private\s+|protected\s+|const\s+|let\s+|var\s+|function\s+|type\s+|interface\s+|if\s+__name__|print\(|<[a-zA-Z0-9_\-]+|\{|\{|\[|[a-zA-Z0-9_\-]+:\s+)',
+            r'^(?:#|//|/\*|<!--|"""|\'\'\'|import\s+|from\s+|export\s+|package\s+|@\w+|def\s+|class\s+|async\s+|public\s+|private\s+|protected\s+|const\s+|let\s+|var\s+|function\s+|type\s+|interface\s+|if\s+__name__|print\(|<[a-zA-Z0-9_!\-]+|\{|\[|[a-zA-Z0-9_.\-]+\s*(?:[:=]|[><=!~]=))',
             stripped
         ):
             start_idx = idx
@@ -386,10 +401,55 @@ def clean_code_preamble(content: str) -> str:
     return content.strip()
 
 
+# Matches fenced code blocks of 3+ backticks even when the language tag has trailing commas/metadata (e.g. ```ini,)
+FENCE_BLOCK_RE = re.compile(
+    r"(`{3,})([a-zA-Z0-9_+#.\-]*)[ \t,;:]*([^\n]*)\n(.*?)\1",
+    re.DOTALL,
+)
+
+KNOWN_LANG_HEADERS = {
+    "python", "py", "javascript", "js", "typescript", "ts", "jsx", "tsx",
+    "java", "html", "css", "json", "bash", "sh", "shell", "sql",
+    "plaintext", "text", "yaml", "yml", "xml", "properties", "gradle", "groovy",
+    "markdown", "md", "ini", "toml", "dotenv", "env",
+}
+
+
+def _extract_shell_commands(cmd_block: str, commands: List[str]) -> None:
+    """Appends non-comment lines from a shell block to `commands`."""
+    for line in cmd_block.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and not stripped.startswith("//"):
+            commands.append(stripped)
+
+
+def _find_valid_file_headers(text: str) -> List[re.Match]:
+    """
+    Finds top-level `File: <path>` section headers that are followed by either
+    a fenced code block or a known language label line.
+    """
+    header_re = re.compile(
+        r'(?:^|\n)[ \t]*(?:###?\s*|\*\*|#\s*)?(?:File|Filename|Path)\s*:\s*`?([a-zA-Z0-9_.\-/\\]+)`?\s*\*?\*?[ \t]*(?=\n|$)',
+        re.IGNORECASE,
+    )
+    valid_headers: List[re.Match] = []
+    for m in header_re.finditer(text):
+        rest = text[m.end():].lstrip("\r\n ")
+        if not rest:
+            continue
+        first_line = rest.splitlines()[0].strip()
+        first_token = re.split(r"[\s,;:]+", first_line)[0].lower() if first_line else ""
+        if first_line.startswith("```") or first_token in KNOWN_LANG_HEADERS:
+            valid_headers.append(m)
+    return valid_headers
+
+
 def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
     """
     Direct, deterministic parser that extracts all code blocks and shell commands
     reliably without depending on external LLMs.
+    Isolates each `File: <path>` section first when present so a malformed or nested
+    fence in one file can never shift or corrupt subsequent files.
     """
     files = []
     commands = []
@@ -405,19 +465,117 @@ def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
         "yaml": ".yaml", "yml": ".yml",
         "xml": ".xml", "properties": ".properties", "gradle": ".gradle", "groovy": ".gradle",
         "markdown": ".md", "md": ".md",
-        "text": ".txt", "txt": ".txt",
+        "text": ".txt", "txt": ".txt", "plaintext": ".txt",
+        "ini": ".ini", "toml": ".toml",
         "sql": ".sql",
     }
 
-    # Find all code blocks with their preceding context
-    pattern = re.compile(r"```(?:([a-zA-Z0-9_\-]+))?(?:[ \t]+([^\n]+))?\n(.*?)```", re.DOTALL)
+    # Strategy 1: Section-isolated extraction when `File: <path>` headers are present
+    file_headers = _find_valid_file_headers(text)
+    if file_headers:
+        # 1a. Extract any setup shell blocks appearing before the first `File:` header
+        preamble_text = text[:file_headers[0].start()]
+        for m in FENCE_BLOCK_RE.finditer(preamble_text):
+            lang = (m.group(2) or "").strip().lower()
+            body = m.group(4).strip()
+            if lang in ("bash", "sh", "shell", "zsh", "console") or any(
+                kw in body for kw in ("pip install", "npm install", "python3 -m venv")
+            ):
+                _extract_shell_commands(body, commands)
 
+        # 1b. Parse each `File: <path>` section in complete isolation
+        for i, h_match in enumerate(file_headers):
+            fpath = normalize_declared_filepath(h_match.group(1))
+            sec_start = h_match.end()
+            sec_end = file_headers[i + 1].start() if (i + 1 < len(file_headers)) else len(text)
+            chunk = text[sec_start:sec_end].strip()
+
+            is_last_section = (i + 1 == len(file_headers))
+            is_markdown_file = fpath.lower().endswith((".md", ".markdown"))
+
+            if is_markdown_file:
+                # If the last section is a Markdown file followed by a standalone trailing
+                # ```bash ... ``` block after the README's closing ``` fence, peel that off first
+                if is_last_section:
+                    trailing_bash = re.search(
+                        r"\n`{3,}\s*\n`{3,}(?:bash|sh|shell)[ \t]*\n(.*?)`{3,}\s*$",
+                        chunk,
+                        re.IGNORECASE | re.DOTALL,
+                    )
+                    if trailing_bash:
+                        _extract_shell_commands(trailing_bash.group(1), commands)
+                        chunk = chunk[:trailing_bash.start()].strip()
+
+                # Strip outer ```markdown / ```md fence wrapping the README content
+                chunk = re.sub(r"^`{3,}(?:markdown|md)?[^\n]*\n", "", chunk, flags=re.IGNORECASE)
+                chunk = re.sub(r"\n`{3,}\s*$", "", chunk)
+                if chunk.strip():
+                    files.append({"path": fpath, "content": chunk.strip()})
+                continue
+
+            # Non-markdown file section: extract first fenced code block if present
+            fenced_matches = list(FENCE_BLOCK_RE.finditer(chunk))
+            if fenced_matches:
+                primary = fenced_matches[0]
+                primary_lang = (primary.group(2) or "").strip().lower()
+                primary_body = primary.group(4).strip()
+                clean_body = (
+                    primary_body
+                    if fpath.lower().endswith((".txt", ".env", ".example", ".ini", ".cfg", ".conf", ".properties"))
+                    else clean_code_preamble(primary_body)
+                )
+                if clean_body:
+                    if fpath.endswith(".sh") or primary_lang in ("bash", "sh", "shell"):
+                        _extract_shell_commands(clean_body, commands)
+                        if fpath != "run.sh":
+                            files.append({"path": fpath, "content": clean_body})
+                    else:
+                        files.append({"path": fpath, "content": clean_body})
+
+                # Any subsequent fenced bash/sh block in this section (e.g. after the last file)
+                for extra_m in fenced_matches[1:]:
+                    extra_lang = (extra_m.group(2) or "").strip().lower()
+                    extra_body = extra_m.group(4).strip()
+                    if extra_lang in ("bash", "sh", "shell", "zsh", "console") or any(
+                        kw in extra_body for kw in ("npm install", "pip install", "mvn ", "gradle ", "pytest")
+                    ):
+                        _extract_shell_commands(extra_body, commands)
+            else:
+                # Unfenced section (or unclosed fence): strip trailing `Bash\n<cmds>` and leading language line
+                cmd_match = re.search(r"\n(?:Bash|Shell|Terminal)\s*\n(.*)$", chunk, re.IGNORECASE | re.DOTALL)
+                if cmd_match:
+                    _extract_shell_commands(cmd_match.group(1).strip(), commands)
+                    chunk = chunk[:cmd_match.start()].strip()
+
+                chunk = re.sub(r"^`{3,}[^\n]*\n", "", chunk)
+                chunk = re.sub(r"\n`{3,}\s*$", "", chunk)
+                lines = chunk.splitlines()
+                if lines and lines[0].strip().lower() in KNOWN_LANG_HEADERS:
+                    chunk = "\n".join(lines[1:]).strip()
+
+                clean_body = (
+                    chunk.strip()
+                    if fpath.lower().endswith((".txt", ".env", ".example", ".ini", ".cfg", ".conf", ".properties"))
+                    else clean_code_preamble(chunk)
+                )
+                if clean_body:
+                    files.append({"path": fpath, "content": clean_body})
+
+        return {
+            "explanation": f"Extracted {len(files)} code file(s) and {len(commands)} command(s).",
+            "files_to_write": files,
+            "commands_to_run": commands,
+            "valid": True,
+            "validation_notes": "Deterministic extraction successful.",
+        }
+
+    # Strategy 2: Fenced code block scan when no `File: <path>` section headers exist
     pos = 0
-    idx = 0
-    for match in pattern.finditer(text):
-        lang = (match.group(1) or "").strip().lower()
-        fence_extra = (match.group(2) or "").strip()
-        content = match.group(3)
+    file_idx = 0
+    for match in FENCE_BLOCK_RE.finditer(text):
+        lang = (match.group(2) or "").strip().lower()
+        fence_extra = (match.group(3) or "").strip()
+        content = match.group(4)
 
         preceding_chunk = text[pos:match.start()]
         pos = match.end()
@@ -438,98 +596,54 @@ def extract_code_blocks(text: str, user_prompt: str = "") -> Dict[str, Any]:
             if m and m.group(1).strip():
                 candidate = m.group(1).strip()
                 if candidate not in ["python", "bash", "sh", "javascript", "js", "typescript", "ts", "java"]:
-                    filename = candidate
+                    filename = normalize_declared_filepath(candidate)
 
         if not filename:
-            filename = extract_filename_from_context(preceding_chunk[-300:], first_line, lang, idx, user_prompt)
+            filename = extract_filename_from_context(preceding_chunk[-300:], first_line, lang, file_idx, user_prompt)
 
-        # Infer default filename if still undetected
+        is_shell_block = (
+            (filename and filename.endswith(".sh"))
+            or lang in ["bash", "sh", "shell", "zsh", "console"]
+            or (not filename and any(cmd_kw in clean_content for cmd_kw in ["npm install", "pip install"]))
+        )
+
+        # Infer default filename if still undetected and not a pure command block
         default_ext = ext_map.get(lang, ".py")
-        if not filename:
+        if not filename and not is_shell_block:
             if default_ext == ".py":
-                filename = "main.py" if idx == 0 else f"module_{idx+1}.py"
+                filename = "main.py" if file_idx == 0 else f"module_{file_idx+1}.py"
             elif default_ext in [".ts", ".tsx"]:
-                filename = "src/index.ts" if idx == 0 else f"src/module_{idx+1}.ts"
+                filename = "src/index.ts" if file_idx == 0 else f"src/module_{file_idx+1}.ts"
             elif default_ext in [".js", ".jsx"]:
-                filename = "src/index.js" if idx == 0 else f"src/module_{idx+1}.js"
+                filename = "src/index.js" if file_idx == 0 else f"src/module_{file_idx+1}.js"
             elif default_ext == ".java":
                 cm = re.search(r'public\s+(?:class|interface|record|enum)\s+([a-zA-Z0-9_]+)', clean_content)
                 if cm:
                     filename = f"{cm.group(1)}.java"
                 else:
-                    filename = f"Class_{idx+1}.java"
+                    filename = f"Class_{file_idx+1}.java"
             elif default_ext in [".yaml", ".yml"]:
                 filename = "application.yaml" if any(k in text.lower() for k in ["spring", "server:"]) else "config.yaml"
             elif default_ext == ".json":
-                filename = "package.json" if "dependencies" in clean_content else f"data_{idx+1}.json"
+                filename = "package.json" if "dependencies" in clean_content else f"data_{file_idx+1}.json"
             elif default_ext == ".gradle":
                 filename = "build.gradle"
             elif default_ext == ".xml":
-                filename = "pom.xml" if "modelVersion" in clean_content else f"config_{idx+1}.xml"
+                filename = "pom.xml" if "modelVersion" in clean_content else f"config_{file_idx+1}.xml"
             elif default_ext == ".html":
                 filename = "index.html"
             elif default_ext == ".css":
                 filename = "styles.css"
-            elif default_ext == ".sh":
-                filename = "run.sh"
             else:
-                filename = f"file_{idx+1}{default_ext}"
+                filename = f"file_{file_idx+1}{default_ext}"
 
-        # Separate shell scripts / installation commands from regular files
-        if filename.endswith(".sh") or lang in ["bash", "sh"] or any(cmd_kw in clean_content for cmd_kw in ["npm install", "pip install"]):
-            for line in clean_content.splitlines():
-                stripped = line.strip()
-                if stripped and not stripped.startswith("#") and not stripped.startswith("//"):
-                    commands.append(stripped)
-            # If it's an explicit shell script file, also write the file
+        if is_shell_block:
+            _extract_shell_commands(clean_content, commands)
             if filename and filename != "run.sh" and filename.endswith((".sh", ".bash")):
                 files.append({"path": filename, "content": clean_content})
         else:
             files.append({"path": filename, "content": clean_content})
-
-        idx += 1
-
-    # If no markdown fenced code blocks were found, check for "File: <path>" headers
-    if not files:
-        file_header_pattern = re.compile(
-            r'(?:^|\n)(?:###\s*|\*\*|#\s*)?File:\s*`?([a-zA-Z0-9_\-./]+)`?',
-            re.IGNORECASE
-        )
-        file_matches = list(file_header_pattern.finditer(text))
-        if file_matches:
-            for i, f_match in enumerate(file_matches):
-                fpath = f_match.group(1).strip()
-                content_start = f_match.end()
-                if i + 1 < len(file_matches):
-                    content_end = file_matches[i + 1].start()
-                else:
-                    content_end = len(text)
-
-                chunk = text[content_start:content_end].strip()
-
-                # Check if the chunk contains a command section like "Bash\n<command>"
-                cmd_match = re.search(r'\n(?:Bash|Shell|Terminal)\s*\n(.*)$', chunk, re.IGNORECASE | re.DOTALL)
-                if cmd_match:
-                    cmd_text = cmd_match.group(1).strip()
-                    for cline in cmd_text.splitlines():
-                        cl = cline.strip()
-                        if cl and not cl.startswith("#") and not cl.startswith("//"):
-                            commands.append(cl)
-                    chunk = chunk[:cmd_match.start()].strip()
-
-                # Remove leading language name line if present (e.g. "Plaintext\n", "Python\n")
-                known_langs = {
-                    "python", "py", "javascript", "js", "typescript", "ts", "jsx", "tsx",
-                    "java", "html", "css", "json", "bash", "sh", "shell", "sql",
-                    "plaintext", "text", "yaml", "yml", "xml", "properties", "gradle", "markdown", "md"
-                }
-                lines = chunk.splitlines()
-                if lines and lines[0].strip().lower() in known_langs:
-                    chunk = "\n".join(lines[1:]).strip()
-
-                clean_content = clean_code_preamble(chunk)
-                if clean_content:
-                    files.append({"path": fpath, "content": clean_content})
+            file_idx += 1
 
     # Fallback: only if text has real code statements (not conversational prose or system prompts)
     if not files:

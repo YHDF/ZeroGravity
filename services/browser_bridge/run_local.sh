@@ -19,6 +19,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 PROFILE_DIR="${REPO_ROOT}/data/browser_profile"
 HEADED="false"
+MANUAL_SUBMIT="${ZEROGRAVITY_MANUAL_SUBMIT:-false}"
 PORT="5000"
 NOVNC_PORT="6080"
 NATIVE="false"
@@ -28,6 +29,11 @@ CHANNEL="${BROWSER_CHANNEL:-}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --headed|-Headed)
+            HEADED="true"
+            shift
+            ;;
+        --manual-submit|-ManualSubmit)
+            MANUAL_SUBMIT="true"
             HEADED="true"
             shift
             ;;
@@ -110,18 +116,21 @@ if [[ "$NATIVE" == "false" && -z "$BROWSER_EXECUTABLE" && -z "$CHANNEL" ]]; then
     DOCKER_ARGS=(
         run --rm -it
         --name gemini-bridge
+        --shm-size=1g
         -p "${PORT}:5000"
         -p "${NOVNC_PORT}:6080"
         -e "BROWSER_PROFILE_DIR=/data/browser_profile"
         -e "ZEROGRAVITY_HEADLESS=${HEADLESS_VAL}"
+        -e "ZEROGRAVITY_MANUAL_SUBMIT=${MANUAL_SUBMIT}"
         -e "PORT=5000"
         -e "NOVNC_PORT=6080"
         -v "${RESOLVED_PROFILE_DIR}:/data/browser_profile"
         -v "${RESOLVED_WORKSPACE_DIR}:/workspace"
     )
 
-    if docker network ls --filter "name=0g_zerogravity-net" -q | grep -q .; then
-        DOCKER_ARGS+=(--network "0g_zerogravity-net")
+    NET_NAME="$(docker network ls --filter "name=zerogravity-net" --format "{{.Name}}" | head -n 1)"
+    if [[ -n "$NET_NAME" ]]; then
+        DOCKER_ARGS+=(--network "$NET_NAME")
     fi
 
     exec docker "${DOCKER_ARGS[@]}" "$IMAGE_NAME"
@@ -146,6 +155,7 @@ export BROWSER_PROFILE_DIR="$RESOLVED_PROFILE_DIR"
 export BROWSER_EXECUTABLE_PATH="$BROWSER_EXECUTABLE"
 export BROWSER_CHANNEL="$CHANNEL"
 export ZEROGRAVITY_HEADLESS="$( [[ "$HEADED" == "true" ]] && echo "false" || echo "true" )"
+export ZEROGRAVITY_MANUAL_SUBMIT="$MANUAL_SUBMIT"
 export PORT="$PORT"
 
 exec "$PYTHON" server.py
