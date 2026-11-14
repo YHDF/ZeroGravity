@@ -107,7 +107,7 @@ jobs:
           pip-audit --progress-spinner off -r services/browser_bridge/requirements.txt
 
       - name: Gitleaks (secret scanning)
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
